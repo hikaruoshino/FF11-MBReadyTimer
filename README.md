@@ -1,4 +1,6 @@
-# MBReadyTimer (v4.3.0)
+# MBReadyTimer (v4.4.0)
+
+English follows the Japanese section. → [English](#english)
 
 **ファイナルファンタジーXI（Windower 4用） 自分の魔法の「着弾」と「次の詠唱ができるまで」を見える化するアドオン**
 
@@ -129,6 +131,7 @@ Windower4/addons/MBReadyTimer/
 | `//mbr size <数>` | HUD の文字サイズ（6〜40） |
 | `//mbr sound` | 効果音の ON / OFF |
 | `//mbr hud` | HUD の ON / OFF（OFF でも効果音は鳴ります） |
+| `//mbr lang auto` / `ja` / `en` | 表示の言語（初期値は auto = クライアントの言語。読み込み直しで切り替わります） |
 | `//mbr test` | 表示テスト |
 
 `//mbr` だけを打つと、コマンドの一覧が出ます。
@@ -140,7 +143,7 @@ Windower4/addons/MBReadyTimer/
 * 実測はアドオンを読み込み直すと消えます。数回詠唱すると、また覚えます。
 * 「着弾」は、自分の魔法の完了パケットを受け取った時刻です。
 * 詠唱を始めたあと、予測の時刻を 10 秒過ぎても着弾を受け取れなかったときは、表示を待機中に戻します。
-* 表示とチャットの文言は日本語だけです。
+* 表示とチャットの文言は、ゲームクライアントの言語に合わせて日本語か英語になります。`//mbr lang ja` / `//mbr lang en` で固定できます（`//mbr lang auto` で元に戻る。読み込み直しで切り替わります）。英語クライアントでは未確認です。
 * 外部ツールの利用は自己責任でお願いします。
 
 ---
@@ -148,7 +151,7 @@ Windower4/addons/MBReadyTimer/
 ## 📜 動作環境・ライセンス
 
 * **作者**: hikaruoshino
-* **動作環境**: Windower 4（日本語クライアント）
+* **動作環境**: Windower 4（日本語クライアントで確認。英語クライアントは英語表示に対応していますが、未確認です）
 * **使用ライブラリ**: `luau`, `config`, `texts`, `resources`（すべて Windower 標準）
 * **ライセンス**: MIT License
 
@@ -156,6 +159,8 @@ Windower4/addons/MBReadyTimer/
 
 ## 📜 更新履歴（Changelog）
 
+* **v4.4.0 (2026-10-22)**
+  * 英語表示に対応。ゲームクライアントの言語に合わせて自動で切り替わる（`//mbr lang auto|ja|en`）。魔法名・連携名も英語で出す。英語クライアントでの動作は未確認。
 * **v4.3.0 (2026-10-12)**
   * 学者の震天連携に対応。震天動地の章の 1 発目では READY の効果音を鳴らさず、自分の魔法で連携が起きたところで READY を知らせる。
   * 自分の魔法で起きた連携について、経過時間と、その後の魔法がマジックバーストになったかを表示・記録する。
@@ -171,3 +176,70 @@ Windower4/addons/MBReadyTimer/
   * HUD の大きさをマウスホイールと右下の角のドラッグで変えられるようにした。
 * **v3.2.0 (2026-10-04)**
   * 最初の公開版。
+
+---
+
+<a id="english"></a>
+
+## English
+
+MBReadyTimer is a Windower 4 addon for FINAL FANTASY XI. It shows when your own spell lands and when you can cast the next one, so you can time magic bursts.
+
+It reads your own actions and draws a HUD. It never sends anything to the game, and it does not cast for you.
+
+**Not tested on the English client yet.** The display switches to English automatically when the client is English (`//mbr lang ja|en|auto` to force it), but I have only played it on the Japanese client.
+
+### What it shows
+
+- Time left until the spell lands, then until you can cast again (bar and seconds).
+- "READY!" when the recast is over, with a sound if you add your own wav (see below).
+- "Magic Burst!" when your spell bursts.
+- Scholar: skillchains made with your own spells (Immanence). The first spell does not play the READY sound. When your second spell makes the skillchain, you get READY, the time since the skillchain, whether each following spell burst, and the recast left on it.
+
+### How it predicts
+
+It remembers how long your last casts took from start to landing, so Fast Cast, gear and lag are already in the number. Until it has a measurement it uses the FC rate you set (default 80%). "Landing" is the moment your client receives the packet saying the spell finished.
+
+The lock after landing is 3.08 s by default, measured on my setup. If READY appears before you can actually cast, raise it (`//mbr post 3.2`). If you can cast before READY, lower it.
+
+### Install
+
+1. On GitHub, click Code, then Download ZIP.
+2. Unzip it and rename the folder to `MBReadyTimer`. The ZIP unzips as `FF11-MBReadyTimer-main`, and the addon will not load under that name.
+3. Put the folder in `Windower4/addons/`.
+4. In game: `//lua l mbreadytimer`. `//mbr test` shows the display.
+
+Only Windower 4 is needed.
+
+### Sound
+
+No sound is included. Put any wav file at `Windower4/addons/MBReadyTimer/sounds/ready.wav` (create the `sounds` folder). Only wav works. You do not need to reload. `//mbr sound` turns the sound on and off.
+
+### Commands (`//mbr` or `//mbtimer`)
+
+| Command | What it does |
+| :--- | :--- |
+| `//mbr` | List the commands |
+| `//mbr test` | Show a test display |
+| `//mbr status` | Current settings and the last measured cast time |
+| `//mbr learn` / `//mbr learn reset` | List the measurements used for prediction / clear them |
+| `//mbr fc <rate>` | FC rate used when there is no measurement (e.g. `//mbr fc 80`) |
+| `//mbr post <sec>` | Lock after landing (e.g. `//mbr post 3.08`) |
+| `//mbr sc` | Scholar Immanence skillchain mode on / off |
+| `//mbr sc window <sec>` | Length of the skillchain timer bar (3-15, default 10; a rough guide, not a measured window) |
+| `//mbr sc report` | One-line skillchain result and recast time in the chat log, on / off |
+| `//mbr pos <x> <y>` | HUD position (you can also drag it) |
+| `//mbr size <n>` | HUD text size, 6-40 (the mouse wheel or the bottom-right corner also works) |
+| `//mbr sound` | READY sound on / off |
+| `//mbr hud` | HUD on / off (the sound still plays) |
+| `//mbr lang auto` / `ja` / `en` | Display language (reload to apply) |
+
+### Notes
+
+- Measurements are lost when you reload the addon. It learns again after a few casts.
+- If the landing packet does not arrive within 10 s of the estimate, the HUD goes back to idle.
+- Only skillchains made by your own spells are shown. Other players' skillchains are ignored.
+- The HUD uses the Meiryo font by default. If your Windows does not have it, change `text.font` in `data/settings.xml`.
+- Use of external tools is at your own risk.
+
+Released under the MIT License. Author: hikaruoshino.

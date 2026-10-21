@@ -1,5 +1,5 @@
 -- =============================================================================
--- MBReadyTimer.lua : FFXI 自分の魔法の着弾と、次の詠唱ができるまでの硬直を表示するアドオン (v4.3.0)
+-- MBReadyTimer.lua : FFXI 自分の魔法の着弾と、次の詠唱ができるまでの硬直を表示するアドオン (v4.4.0)
 -- =============================================================================
 -- 【概要】
 -- 自動キャストは一切行わない受動型アシストツール。
@@ -30,7 +30,7 @@
 
 _addon.name     = "MBReadyTimer"
 _addon.author   = "hikaruoshino"
-_addon.version  = "4.3.0"
+_addon.version  = "4.4.0"
 _addon.commands = {"mbtimer", "mbr"}
 
 require("luau")
@@ -53,8 +53,33 @@ defaults.show_hud = true
 defaults.sc_mode = true         -- 学者の震天連携の動き (1 発目は READY を鳴らさない・連携後の経過表示)
 defaults.sc_window_sec = 10.0   -- 連携からマジックバーストの受付が閉じるまでの目安 (表示の目盛りに使うだけ)
 defaults.sc_report = true       -- 連携が終わったら、マジックバーストの結果をチャットログに 1 行出す
+defaults.lang = "auto"          -- 表示の言語: auto (クライアントの言語に合わせる) / ja / en
 
 local settings = config.load(defaults)
+
+-- 表示の言語。auto のときはゲームクライアントの言語 (windower.ffxi.get_info().language) に合わせる
+local LANG
+local function resolve_lang()
+    local s = tostring(settings.lang or "auto"):lower()
+    if s == "ja" or s == "en" then return s end
+    local ok, info = pcall(windower.ffxi.get_info)
+    local l = ok and info and info.language and tostring(info.language):lower() or "japanese"
+    return (l == "japanese") and "ja" or "en"
+end
+LANG = resolve_lang()
+
+-- 日本語と英語の文を対で書く。言語に合わせたほうを返す
+local function L(ja, en)
+    if LANG == "ja" then return ja end
+    return en
+end
+
+-- 魔法・系統の名前。日本語クライアントは日本語、英語クライアントは英語
+local function res_name(entry)
+    if not entry then return nil end
+    if LANG == "ja" then return entry.ja or entry.en end
+    return entry.en or entry.ja
+end
 
 -- -----------------------------------------------------------------------------
 -- 定数
@@ -73,13 +98,16 @@ local RECAST_MAX_SEC = 90.0       -- 見張りを続ける上限 (何かの理�
 -- 技連携の追加効果メッセージ → 連携の名前
 local SKILLCHAIN_MESSAGES = {}
 do
-    local order = {"光", "闇", "重力", "分解", "湾曲", "核熱", "収縮", "溶解", "硬化", "振動", "貫通", "切断", "炸裂", "衝撃"}
+    local order = LANG == "ja"
+        and {"光", "闇", "重力", "分解", "湾曲", "核熱", "収縮", "溶解", "硬化", "振動", "貫通", "切断", "炸裂", "衝撃"}
+        or {"Light", "Darkness", "Gravitation", "Fragmentation", "Distortion", "Fusion", "Compression", "Liquefaction", "Induration", "Reverberation", "Transfixion", "Scission", "Detonation", "Impaction"}
     for i, name in ipairs(order) do
         SKILLCHAIN_MESSAGES[287 + i] = name
         SKILLCHAIN_MESSAGES[384 + i] = name
     end
-    SKILLCHAIN_MESSAGES[767] = "極光"; SKILLCHAIN_MESSAGES[769] = "極光"
-    SKILLCHAIN_MESSAGES[768] = "黒闇"; SKILLCHAIN_MESSAGES[770] = "黒闇"
+    local radiance, umbra = L("極光", "Radiance"), L("黒闇", "Umbra")
+    SKILLCHAIN_MESSAGES[767] = radiance; SKILLCHAIN_MESSAGES[769] = radiance
+    SKILLCHAIN_MESSAGES[768] = umbra; SKILLCHAIN_MESSAGES[770] = umbra
 end
 local SOUND_FILE = windower.addon_path .. "sounds/ready.wav"
 
@@ -88,7 +116,7 @@ local SOUND_FILE = windower.addon_path .. "sounds/ready.wav"
 -- -----------------------------------------------------------------------------
 local function chat_msg(msg, color)
     color = color or 207
-    if windower.to_shift_jis then
+    if LANG == "ja" and windower.to_shift_jis then
         local ok, converted = pcall(windower.to_shift_jis, tostring(msg))
         if ok and converted then
             windower.add_to_chat(color, converted)
@@ -232,7 +260,7 @@ end
 local function build_cast_lines(lines, now)
     local c = state.cast
     if not c.active then
-        table.insert(lines, string.format("状態: %s", color_text("待機中 (Idle)", 180, 180, 180)))
+        table.insert(lines, string.format(L("状態: %s", "Status: %s"), color_text(L("待機中 (Idle)", "Idle"), 180, 180, 180)))
         return
     end
 
@@ -242,15 +270,15 @@ local function build_cast_lines(lines, now)
     if not c.landed_at then
         -- 1. 詠唱中 (着弾パケット待ち)
         local remaining = c.predicted - elapsed
-        table.insert(lines, string.format("魔法: %s (基本%.1fs / 予測詠唱%.2fs / %s)",
+        table.insert(lines, string.format(L("魔法: %s (基本%.1fs / 予測詠唱%.2fs / %s)", "Spell: %s (base %.1fs / est. cast %.2fs / %s)"),
             color_text(c.spell_name, 255, 220, 100), c.base, c.predicted,
-            c.from_learned and "実測から予測" or string.format("FC%d%%で計算", math.floor(fc_rate() * 100 + 0.5))))
+            c.from_learned and L("実測から予測", "from measured") or string.format(L("FC%d%%で計算", "FC %d%% calc"), math.floor(fc_rate() * 100 + 0.5))))
         if remaining >= 0 then
-            table.insert(lines, string.format("状態: %s [%s] 着弾まで%.2fs",
-                color_text("詠唱中...", 255, 180, 50), bar(elapsed / math.max(c.predicted, 0.01), 15, "="), remaining))
+            table.insert(lines, string.format(L("状態: %s [%s] 着弾まで%.2fs", "Status: %s [%s] lands in %.2fs"),
+                color_text(L("詠唱中...", "Casting..."), 255, 180, 50), bar(elapsed / math.max(c.predicted, 0.01), 15, "="), remaining))
         else
-            table.insert(lines, string.format("状態: %s [%s] 予測より+%.2fs",
-                color_text("着弾待ち", 255, 180, 50), bar(1, 15, "="), -remaining))
+            table.insert(lines, string.format(L("状態: %s [%s] 予測より+%.2fs", "Status: %s [%s] +%.2fs over estimate"),
+                color_text(L("着弾待ち", "Waiting for landing"), 255, 180, 50), bar(1, 15, "="), -remaining))
         end
         return
     end
@@ -258,14 +286,14 @@ local function build_cast_lines(lines, now)
     local since_land = now - c.landed_at
     if since_land < post then
         -- 2. 着弾後の硬直中
-        table.insert(lines, string.format("魔法: %s (着弾済 / 実測詠唱%.2fs)",
+        table.insert(lines, string.format(L("魔法: %s (着弾済 / 実測詠唱%.2fs)", "Spell: %s (landed / measured cast %.2fs)"),
             color_text(c.spell_name, 255, 150, 150), state.last_measured_cast or 0))
-        table.insert(lines, string.format("状態: %s [%s] 次の詠唱まで%.2fs",
-            color_text("硬直中", 255, 80, 80), bar(since_land / math.max(post, 0.01), 15, "#"), post - since_land))
+        table.insert(lines, string.format(L("状態: %s [%s] 次の詠唱まで%.2fs", "Status: %s [%s] next cast in %.2fs"),
+            color_text(L("硬直中", "Locked"), 255, 80, 80), bar(since_land / math.max(post, 0.01), 15, "#"), post - since_land))
         if settings.sc_mode and c.sc_name then
-            table.insert(lines, color_text("連携・" .. c.sc_name .. " 発生 → 硬直が解けたらマジックバースト", 255, 230, 80))
+            table.insert(lines, color_text(L("連携・" .. c.sc_name .. " 発生 → 硬直が解けたらマジックバースト", "Skillchain " .. c.sc_name .. " -> magic burst when the lock ends"), 255, 230, 80))
         elseif settings.sc_mode and c.immanence then
-            table.insert(lines, color_text("震天 1 発目 (READY の音は鳴らしません)", 180, 180, 180))
+            table.insert(lines, color_text(L("震天 1 発目 (READY の音は鳴らしません)", "Immanence 1st spell (no READY sound)"), 180, 180, 180))
         end
         return
     end
@@ -273,11 +301,11 @@ local function build_cast_lines(lines, now)
     -- 3. 硬直解除 (効果音と待機中への切り替えは update_state で行う)
     if settings.sc_mode and c.immanence and not c.sc_name then
         -- 震天の 1 発目: 次の魔法は連携の 2 発目なので、マジックバーストの合図は出さない
-        table.insert(lines, color_text("震天 1 発目の硬直解除 (次の魔法で連携)", 180, 180, 180))
+        table.insert(lines, color_text(L("震天 1 発目の硬直解除 (次の魔法で連携)", "Immanence 1st spell done (next spell makes the skillchain)"), 180, 180, 180))
     elseif settings.sc_mode and c.sc_name then
-        table.insert(lines, color_text("★ READY! 連携・" .. c.sc_name .. " → マジックバースト", 50, 255, 100))
+        table.insert(lines, color_text(L("★ READY! 連携・" .. c.sc_name .. " → マジックバースト", "★ READY! Skillchain " .. c.sc_name .. " -> Magic Burst"), 50, 255, 100))
     else
-        table.insert(lines, color_text("★ READY! (硬直解除・次の詠唱可)", 50, 255, 100))
+        table.insert(lines, color_text(L("★ READY! (硬直解除・次の詠唱可)", "★ READY! (you can cast now)"), 50, 255, 100))
     end
 end
 
@@ -288,15 +316,15 @@ local function build_sc_lines(lines, now)
     local elapsed = now - sc.at
     local window = math.max(1, num(settings.sc_window_sec, 10.0))
     if elapsed <= window then
-        table.insert(lines, string.format("連携: %s [%s] %.1fs 経過 (目安 残り%.1fs)",
+        table.insert(lines, string.format(L("連携: %s [%s] %.1fs 経過 (目安 残り%.1fs)", "Skillchain: %s [%s] %.1fs elapsed (about %.1fs left)"),
             color_text(sc.name, 255, 230, 80), bar(elapsed / window, 15, ">"), elapsed, window - elapsed))
     else
-        table.insert(lines, string.format("連携: %s %s (%.1fs 経過)",
-            color_text(sc.name, 180, 180, 180), color_text("受付の目安を過ぎました", 180, 180, 180), elapsed))
+        table.insert(lines, string.format(L("連携: %s %s (%.1fs 経過)", "Skillchain: %s %s (%.1fs elapsed)"),
+            color_text(sc.name, 180, 180, 180), color_text(L("受付の目安を過ぎました", "window has probably closed"), 180, 180, 180), elapsed))
     end
     for i, cast in ipairs(sc.casts) do
-        table.insert(lines, string.format("  %d 発目 %s %.1fs後 %s", i, cast.name, cast.t,
-            cast.mb and color_text("MB", 255, 230, 80) or color_text("MB ならず", 255, 120, 120)))
+        table.insert(lines, string.format(L("  %d 発目 %s %.1fs後 %s", "  #%d %s at %.1fs %s"), i, cast.name, cast.t,
+            cast.mb and color_text("MB", 255, 230, 80) or color_text(L("MB ならず", "no MB"), 255, 120, 120)))
     end
 end
 
@@ -312,9 +340,9 @@ local function build_recast_lines(lines, now)
             -- 読み直すまでの間は、前に読んだ値から経過分を引いて表示する
             local left = w.remaining - (now - w.polled_at)
             if left > 0.05 then
-                table.insert(lines, string.format("再詠唱: %s あと%.1fs", color_text(w.name, 255, 150, 150), left))
+                table.insert(lines, string.format(L("再詠唱: %s あと%.1fs", "Recast: %s %.1fs left"), color_text(w.name, 255, 150, 150), left))
             else
-                table.insert(lines, string.format("再詠唱: %s %s", color_text(w.name, 50, 255, 100), color_text("撃てます", 50, 255, 100)))
+                table.insert(lines, string.format(L("再詠唱: %s %s", "Recast: %s %s"), color_text(w.name, 50, 255, 100), color_text(L("撃てます", "ready"), 50, 255, 100)))
             end
         end
     end
@@ -334,7 +362,7 @@ local function poll_recasts(now)
             if not w.total then
                 w.total = remaining + (now - w.landed_at)
                 if settings.sc_report then
-                    chat_msg(string.format("[MBReadyTimer] %s の再詠唱時間: %.1f秒 (着弾から)", w.name, w.total))
+                    chat_msg(string.format(L("[MBReadyTimer] %s の再詠唱時間: %.1f秒 (着弾から)", "[MBReadyTimer] %s recast: %.1fs (from landing)"), w.name, w.total))
                 end
             end
         else
@@ -354,9 +382,9 @@ local function close_sc()
     local parts, mb_count = {}, 0
     for _, cast in ipairs(sc.casts) do
         if cast.mb then mb_count = mb_count + 1 end
-        parts[#parts + 1] = string.format("%s %.1fs後%s", cast.name, cast.t, cast.mb and "" or " (MBならず)")
+        parts[#parts + 1] = string.format(L("%s %.1fs後%s", "%s at %.1fs%s"), cast.name, cast.t, cast.mb and "" or L(" (MBならず)", " (no MB)"))
     end
-    chat_msg(string.format("[MBReadyTimer] 連携・%s: MB %d 回 / %s", sc.name, mb_count, table.concat(parts, " → ")))
+    chat_msg(string.format(L("[MBReadyTimer] 連携・%s: MB %d 回 / %s", "[MBReadyTimer] Skillchain %s: %d MB / %s"), sc.name, mb_count, table.concat(parts, " -> ")))
 end
 
 -- 時間の経過で変わる状態を進める。HUD の表示とは別に毎回行う (HUD を消していても READY の効果音を鳴らすため)
@@ -394,7 +422,7 @@ local function render(now)
     build_sc_lines(lines, now)
     build_recast_lines(lines, now)
     if state.mb_success_at and now - state.mb_success_at < 3.0 then
-        table.insert(lines, color_text("★ マジックバースト成功！", 255, 230, 80))
+        table.insert(lines, color_text(L("★ マジックバースト成功！", "★ Magic Burst!"), 255, 230, 80))
     end
     -- texts の text() は設定のたびに文字列を解析し直すので、変わったときだけ設定する (待機中は毎回同じ)
     local text = table.concat(lines, string.char(10))
@@ -420,7 +448,7 @@ windower.register_event("prerender", function()
     state.last_refresh = now
 
     local ok, err = pcall(update_state, now)
-    if not ok then report_error(now, "状態更新エラー", err) end
+    if not ok then report_error(now, L("状態更新エラー", "state update error"), err) end
 
     if not settings.show_hud then
         if hud:visible() then hud:hide() end
@@ -428,7 +456,7 @@ windower.register_event("prerender", function()
         return
     end
     ok, err = pcall(render, now)
-    if not ok then report_error(now, "表示エラー", err) end
+    if not ok then report_error(now, L("表示エラー", "display error"), err) end
 end)
 
 -- -----------------------------------------------------------------------------
@@ -448,7 +476,7 @@ local function on_own_cast_start(act)
     local base = num(spell.cast_time, 3.0)
     local c = state.cast
     c.active = true
-    c.spell_name = spell.ja or spell.en or "?"
+    c.spell_name = res_name(spell) or "?"
     c.base = base
     c.skill = spell.skill
     c.start = os.clock()
@@ -501,7 +529,7 @@ local function on_own_cast_finish(act, now)
     elseif state.sc and result ~= nil and not c.immanence then
         -- 連携のあとに撃った魔法: マジックバーストになったかどうかを残す
         local spell = res.spells[act.param]
-        local name = spell and (spell.ja or spell.en) or c.spell_name
+        local name = res_name(spell) or c.spell_name
         table.insert(state.sc.casts, {name = name, t = now - state.sc.at, mb = result})
         -- この魔法の再詠唱の残りを見張る (同じ魔法をもう一度撃ったら、新しい着弾から数え直す)
         state.recast_watch[act.param] = {name = name, landed_at = now}
@@ -530,7 +558,7 @@ windower.register_event("action", function(act)
             on_own_cast_finish(act, os.clock())
         end
     end)
-    if not ok then report_error(os.clock(), "アクション処理エラー", err) end
+    if not ok then report_error(os.clock(), L("アクション処理エラー", "action error"), err) end
 end)
 
 -- -----------------------------------------------------------------------------
@@ -627,7 +655,7 @@ windower.register_event("mouse", function(mtype, x, y, delta, blocked)
     if ok then return result end
     resize = nil
     if hud:draggable() ~= move_allowed then hud:draggable(move_allowed) end
-    report_error(os.clock(), "マウス処理エラー", result)
+    report_error(os.clock(), L("マウス処理エラー", "mouse error"), result)
 end)
 
 -- -----------------------------------------------------------------------------
@@ -663,14 +691,14 @@ windower.register_event("addon command", function(cmd, ...)
         settings.pos.y = tonumber(args[2])
         save_settings()
         hud:pos(settings.pos.x, settings.pos.y)
-        chat_msg(string.format("[MBReadyTimer] HUD位置を変更しました: X=%d, Y=%d", settings.pos.x, settings.pos.y))
+        chat_msg(string.format(L("[MBReadyTimer] HUD位置を変更しました: X=%d, Y=%d", "[MBReadyTimer] HUD position set: X=%d, Y=%d"), settings.pos.x, settings.pos.y))
 
     elseif cmd == "post" and tonumber(args[1]) then
         local sec = tonumber(args[1])
         if sec > 0 and sec <= 10 then
             settings.post_lock_sec = sec
             save_settings()
-            chat_msg(string.format("[MBReadyTimer] 着弾後の硬直を %.2f秒 に設定しました。", sec))
+            chat_msg(string.format(L("[MBReadyTimer] 着弾後の硬直を %.2f秒 に設定しました。", "[MBReadyTimer] Lock after landing set to %.2fs."), sec))
         end
 
     elseif cmd == "fc" and tonumber(args[1]) then
@@ -678,48 +706,48 @@ windower.register_event("addon command", function(cmd, ...)
         if fc_val >= 0 and fc_val <= 80 then
             settings.fc_rate = fc_val / 100.0
             save_settings()
-            chat_msg(string.format("[MBReadyTimer] FC率を %d%% に変更しました。", fc_val))
+            chat_msg(string.format(L("[MBReadyTimer] FC率を %d%% に変更しました。", "[MBReadyTimer] FC rate set to %d%%."), fc_val))
         end
 
     elseif cmd == "learn" then
         -- //mbr learn : 覚えている実測の一覧 / //mbr learn reset : 忘れる (装備を大きく変えたとき)
         if args[1] and args[1]:lower() == "reset" then
             learned = {}
-            chat_msg("[MBReadyTimer] 実測の記録を消しました。次の詠唱から覚え直します。")
+            chat_msg(L("[MBReadyTimer] 実測の記録を消しました。次の詠唱から覚え直します。", "[MBReadyTimer] Measurements cleared. It will learn again from your next cast."))
             return
         end
         local any = false
         for skill, l in pairs(learned) do
             any = true
-            local skill_name = res.skills[skill] and (res.skills[skill].ja or res.skills[skill].en) or tostring(skill)
-            chat_msg(string.format("[MBReadyTimer] %s: 実測 %d回 / 基本に対する比率 %.2f (実効FC 約%d%%)",
+            local skill_name = res_name(res.skills[skill]) or tostring(skill)
+            chat_msg(string.format(L("[MBReadyTimer] %s: 実測 %d回 / 基本に対する比率 %.2f (実効FC 約%d%%)", "[MBReadyTimer] %s: %d measurements / ratio to base %.2f (effective FC about %d%%)"),
                 skill_name, l.count, l.ratio, math.floor((1 - l.ratio) * 100 + 0.5)))
             local bases = {}
             for base in pairs(l.by_base) do bases[#bases + 1] = base end
             table.sort(bases)
             for _, base in ipairs(bases) do
-                chat_msg(string.format("    基本%.1fs → 実測平均 %.2fs", base, l.by_base[base]))
+                chat_msg(string.format(L("    基本%.1fs → 実測平均 %.2fs", "    base %.1fs -> measured average %.2fs"), base, l.by_base[base]))
             end
         end
         if not any then
-            chat_msg("[MBReadyTimer] まだ実測がありません。魔法を詠唱すると覚えます (それまでは FC 率で計算)。")
+            chat_msg(L("[MBReadyTimer] まだ実測がありません。魔法を詠唱すると覚えます (それまでは FC 率で計算)。", "[MBReadyTimer] No measurements yet. It learns as you cast (until then it uses the FC rate)."))
         end
 
     elseif cmd == "size" and tonumber(args[1]) then
         local size = set_size(tonumber(args[1]))
         save_settings()
-        chat_msg(string.format("[MBReadyTimer] HUD の文字サイズを %d に変更しました。", size))
+        chat_msg(string.format(L("[MBReadyTimer] HUD の文字サイズを %d に変更しました。", "[MBReadyTimer] HUD text size set to %d."), size))
 
     elseif cmd == "sound" then
         settings.sound_enabled = not settings.sound_enabled
         save_settings()
-        chat_msg(string.format("[MBReadyTimer] 効果音通知: %s%s", settings.sound_enabled and "ON" or "OFF",
-            (windower.file_exists and not windower.file_exists(SOUND_FILE)) and " (sounds/ready.wav がありません)" or ""))
+        chat_msg(string.format(L("[MBReadyTimer] 効果音通知: %s%s", "[MBReadyTimer] Sound: %s%s"), settings.sound_enabled and "ON" or "OFF",
+            (windower.file_exists and not windower.file_exists(SOUND_FILE)) and L(" (sounds/ready.wav がありません)", " (sounds/ready.wav not found)") or ""))
 
     elseif cmd == "hud" then
         settings.show_hud = not settings.show_hud
         save_settings()
-        chat_msg(string.format("[MBReadyTimer] HUD表示: %s", settings.show_hud and "ON" or "OFF"))
+        chat_msg(string.format(L("[MBReadyTimer] HUD表示: %s", "[MBReadyTimer] HUD: %s"), settings.show_hud and "ON" or "OFF"))
 
     elseif cmd == "sc" then
         -- //mbr sc : 学者の震天連携の動きの ON/OFF / //mbr sc window <秒> : 受付の目安 / //mbr sc report : 結果の 1 行の ON/OFF
@@ -729,30 +757,41 @@ windower.register_event("addon command", function(cmd, ...)
             if sec >= 3 and sec <= 15 then
                 settings.sc_window_sec = sec
                 save_settings()
-                chat_msg(string.format("[MBReadyTimer] 連携からの受付の目安を %.1f秒 にしました。", sec))
+                chat_msg(string.format(L("[MBReadyTimer] 連携からの受付の目安を %.1f秒 にしました。", "[MBReadyTimer] Skillchain window estimate set to %.1fs."), sec))
             else
-                chat_msg("[MBReadyTimer] 秒数は 3〜15 で指定してください (例: //mbr sc window 10)。")
+                chat_msg(L("[MBReadyTimer] 秒数は 3〜15 で指定してください (例: //mbr sc window 10)。", "[MBReadyTimer] Use 3 to 15 seconds (e.g. //mbr sc window 10)."))
             end
         elseif sub == "report" then
             settings.sc_report = not settings.sc_report
             save_settings()
-            chat_msg(string.format("[MBReadyTimer] 連携ごとの結果の 1 行: %s", settings.sc_report and "ON" or "OFF"))
+            chat_msg(string.format(L("[MBReadyTimer] 連携ごとの結果の 1 行: %s", "[MBReadyTimer] One-line skillchain result: %s"), settings.sc_report and "ON" or "OFF"))
         else
             settings.sc_mode = not settings.sc_mode
             if not settings.sc_mode then state.sc = nil; state.recast_watch = {} end
             save_settings()
-            chat_msg(string.format("[MBReadyTimer] 学者の震天連携の動き: %s", settings.sc_mode and "ON" or "OFF"))
+            chat_msg(string.format(L("[MBReadyTimer] 学者の震天連携の動き: %s", "[MBReadyTimer] Scholar Immanence skillchain mode: %s"), settings.sc_mode and "ON" or "OFF"))
         end
 
     elseif cmd == "status" then
-        chat_msg(string.format("[MBReadyTimer] 学者の震天連携の動き: %s / 受付の目安 %.1f秒 / 結果の 1 行 %s",
+        chat_msg(string.format(L("[MBReadyTimer] 学者の震天連携の動き: %s / 受付の目安 %.1f秒 / 結果の 1 行 %s", "[MBReadyTimer] Scholar Immanence skillchain mode: %s / window estimate %.1fs / one-line result %s"),
             settings.sc_mode and "ON" or "OFF", num(settings.sc_window_sec, 10.0), settings.sc_report and "ON" or "OFF"))
-        chat_msg(string.format("[MBReadyTimer] FC %d%% (実測が無いときに使用) / 着弾後の硬直 %.2f秒",
+        chat_msg(string.format(L("[MBReadyTimer] FC %d%% (実測が無いときに使用) / 着弾後の硬直 %.2f秒", "[MBReadyTimer] FC %d%% (used when there is no measurement) / lock after landing %.2fs"),
             math.floor(fc_rate() * 100 + 0.5), num(settings.post_lock_sec, 3.08)))
         if state.last_measured_cast and state.cast.base > 0 then
             local real_fc = 1 - state.last_measured_cast / state.cast.base
-            chat_msg(string.format("[MBReadyTimer] 直近の実測: %s 基本%.1fs → %.2fs (実効FC 約%d%%)",
+            chat_msg(string.format(L("[MBReadyTimer] 直近の実測: %s 基本%.1fs → %.2fs (実効FC 約%d%%)", "[MBReadyTimer] Last measurement: %s base %.1fs -> %.2fs (effective FC about %d%%)"),
                 state.cast.spell_name, state.cast.base, state.last_measured_cast, math.floor(real_fc * 100 + 0.5)))
+        end
+
+    elseif cmd == "lang" then
+        -- //mbr lang auto|ja|en : 表示の言語。HUD は次のフレームから、チャットの文は次の操作から切り替わる
+        local v = args[1] and args[1]:lower()
+        if v == "auto" or v == "ja" or v == "en" then
+            settings.lang = v
+            save_settings()
+            chat_msg("[MBReadyTimer] Language: " .. v .. " (reload with //lua r mbreadytimer to apply)")
+        else
+            chat_msg("[MBReadyTimer] Language: " .. tostring(settings.lang) .. " (now " .. LANG .. "). Use //mbr lang auto|ja|en")
         end
 
     elseif cmd == "test" then
@@ -760,7 +799,8 @@ windower.register_event("addon command", function(cmd, ...)
         local now = os.clock()
         local c = state.cast
         c.active = true
-        c.spell_name = "サンダジャ"
+        local test_name = L("サンダジャ", "Thundaja")
+        c.spell_name = test_name
         c.base = 7.0
         c.skill = ELEMENTAL_SKILL
         c.start = now
@@ -772,26 +812,27 @@ windower.register_event("addon command", function(cmd, ...)
         c.ready_signaled = false
         -- 着弾パケットの代わりに予測時刻で着弾させる
         coroutine.schedule(function()
-            if c.active and not c.landed_at and c.spell_name == "サンダジャ" then
+            if c.active and not c.landed_at and c.spell_name == test_name then
                 c.landed_at = os.clock()
                 state.last_measured_cast = c.landed_at - c.start
             end
         end, c.predicted)
-        chat_msg("[MBReadyTimer] テスト表示を開始します (サンダジャの詠唱 → 着弾 → 硬直 → READY)。")
+        chat_msg(L("[MBReadyTimer] テスト表示を開始します (サンダジャの詠唱 → 着弾 → 硬直 → READY)。", "[MBReadyTimer] Test started (Thundaja cast -> landing -> lock -> READY)."))
 
     else
-        chat_msg("=== MBReadyTimer コマンドヘルプ ===")
-        chat_msg("//mbr fc <FC率>       : FC率を変更 (例: //mbr fc 80)")
-        chat_msg("//mbr post <秒>       : 着弾後の硬直秒数を設定 (例: //mbr post 3.08)")
-        chat_msg("//mbr status          : 現在の設定と直近の実測詠唱時間を表示")
-        chat_msg("//mbr learn [reset]   : 予測に使っている実測の一覧 / reset で消して覚え直す")
-        chat_msg("//mbr sc              : 学者の震天連携の動き ON/OFF (震天 1 発目は READY を鳴らさない・連携後の経過を表示)")
-        chat_msg("//mbr sc window <秒>  : 連携からの受付の目安 (3〜15、初期値 10)")
-        chat_msg("//mbr sc report       : 連携ごとの結果 (何秒後の魔法が MB になったか) の 1 行 ON/OFF")
-        chat_msg("//mbr pos <x> <y>     : HUD表示位置の変更 (例: //mbr pos 600 400)")
-        chat_msg("//mbr size <数>       : HUD の文字サイズ (6〜40)。HUD上のホイール / 右下の角のドラッグでも変更可")
-        chat_msg("//mbr sound           : READY効果音 ON/OFF")
-        chat_msg("//mbr hud             : HUD表示 ON/OFF")
-        chat_msg("//mbr test            : 表示テスト")
+        chat_msg(L("=== MBReadyTimer コマンドヘルプ ===", "=== MBReadyTimer commands ==="))
+        chat_msg(L("//mbr fc <FC率>       : FC率を変更 (例: //mbr fc 80)", "//mbr fc <rate>       : set the FC rate (e.g. //mbr fc 80)"))
+        chat_msg(L("//mbr post <秒>       : 着弾後の硬直秒数を設定 (例: //mbr post 3.08)", "//mbr post <sec>      : set the lock after landing (e.g. //mbr post 3.08)"))
+        chat_msg(L("//mbr status          : 現在の設定と直近の実測詠唱時間を表示", "//mbr status          : show settings and the last measured cast time"))
+        chat_msg(L("//mbr learn [reset]   : 予測に使っている実測の一覧 / reset で消して覚え直す", "//mbr learn [reset]   : list the measurements used for prediction / reset to learn again"))
+        chat_msg(L("//mbr sc              : 学者の震天連携の動き ON/OFF (震天 1 発目は READY を鳴らさない・連携後の経過を表示)", "//mbr sc              : Scholar Immanence skillchain mode ON/OFF (no READY sound on the 1st spell, shows time since the skillchain)"))
+        chat_msg(L("//mbr sc window <秒>  : 連携からの受付の目安 (3〜15、初期値 10)", "//mbr sc window <sec> : skillchain window estimate (3-15, default 10)"))
+        chat_msg(L("//mbr sc report       : 連携ごとの結果 (何秒後の魔法が MB になったか) の 1 行 ON/OFF", "//mbr sc report       : one-line result per skillchain (which spell burst, and when) ON/OFF"))
+        chat_msg(L("//mbr pos <x> <y>     : HUD表示位置の変更 (例: //mbr pos 600 400)", "//mbr pos <x> <y>     : move the HUD (e.g. //mbr pos 600 400)"))
+        chat_msg(L("//mbr size <数>       : HUD の文字サイズ (6〜40)。HUD上のホイール / 右下の角のドラッグでも変更可", "//mbr size <n>        : HUD text size (6-40). The mouse wheel or the bottom-right corner also works"))
+        chat_msg(L("//mbr sound           : READY効果音 ON/OFF", "//mbr sound           : READY sound ON/OFF"))
+        chat_msg(L("//mbr hud             : HUD表示 ON/OFF", "//mbr hud             : HUD ON/OFF"))
+        chat_msg("//mbr lang auto|ja|en : " .. L("表示の言語", "display language"))
+        chat_msg(L("//mbr test            : 表示テスト", "//mbr test            : show a test display"))
     end
 end)
