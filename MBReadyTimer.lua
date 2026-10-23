@@ -784,7 +784,7 @@ windower.register_event("addon command", function(cmd, ...)
         end
 
     elseif cmd == "lang" then
-        -- //mbr lang auto|ja|en : 表示の言語。HUD は次のフレームから、チャットの文は次の操作から切り替わる
+        -- //mbr lang auto|ja|en : 表示の言語。設定は保存され、読み込み直し (//lua r mbreadytimer) で切り替わる
         local v = args[1] and args[1]:lower()
         if v == "auto" or v == "ja" or v == "en" then
             settings.lang = v
