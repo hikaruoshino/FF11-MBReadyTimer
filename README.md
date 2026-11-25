@@ -1,4 +1,4 @@
-# MBReadyTimer (v4.4.0)
+# MBReadyTimer (v4.4.3)
 
 English follows the Japanese section. → [English](#english)
 
@@ -88,7 +88,13 @@ English follows the Japanese section. → [English](#english)
 
 * 連携のあとに魔法を撃っていれば、連携から 15 秒後（または次の連携を始めたとき）に、結果をチャットログに 1 行出します（例: `[MBReadyTimer] 連携・核熱: MB 2 回 / ファイアV 4.6s後 → ファイアIV 8.9s後`）。`//mbr sc report` で消せます。
 * 連携のあとに撃った魔法は、再詠唱時間（着弾から数えた秒数）もチャットログに 1 行出します。
+* 記録する魔法（v4.4.2）:
+  * マジックバーストになった魔法は、どの魔法でも「MB」と記録します。
+  * マジックバーストにならなかった魔法は、**属性ダメージ魔法だけ**を「MBならず」と記録します（ダメージ・抵抗・効果なしのどれでも）。属性ダメージ魔法かどうかは、Windower の `res/spells.lua` の項目で決めます: `skill` が 36（精霊魔法）か 39（忍術）、`element` が 0〜7（火〜闇）、対象（`targets`）に敵を含む、`status` が無い（直接のダメージ）か 186（計略）。このほか、メルトン（`res/spells.lua` の 502）も名指しで加えています（v4.4.3）。メルトンは暗黒魔法（`skill` 37）で、`res/spells.lua` の項目ではドレイン・スタンなどと区別できないためです。
+  * それ以外の魔法（ディア・バイオ・スロウなどの弱体、ドレイン・アスピル、スタン、バーンなどの精霊の弱体、メテオ、青魔法など）は、マジックバーストにならなければ記録しません。再詠唱の残りも表示しません。
 * 経過時間のバーの長さ（初期値 10 秒）は**目安**です。実際のマジックバーストの受付時間を測ったものではありません。`//mbr sc window <秒>` で変えられます。
+* 結果の 1 行は、連携から 15 秒以内に着弾した魔法だけを数えます。15 秒を過ぎた魔法は記録しません。
+* 連携から 15 秒たつ前に、ゾーン移動・ログアウト・`//mbr sc` での OFF があると、その連携は捨てて、結果の 1 行は出しません。ゾーン移動・ログアウトでは、再詠唱の残りの表示（見張り）も消します。
 * 扱うのは**自分の魔法で起きた連携だけ**です。ほかの人が起こした連携は、今までどおり表示しません。
 * 学者以外のジョブでは、今までと同じ動きです。この動きが要らないときは `//mbr sc` で切れます。
 
@@ -130,6 +136,7 @@ Windower4/addons/MBReadyTimer/
 | `//mbr pos <x> <y>` | HUD の位置 |
 | `//mbr size <数>` | HUD の文字サイズ（6〜40） |
 | `//mbr sound` | 効果音の ON / OFF |
+| `//mbr lead <秒>` | 効果音だけを、硬直解除の何秒前に鳴らすか（0〜1、初期値 0。HUD の表示は変わりません。例: `//mbr lead 0.2`） |
 | `//mbr hud` | HUD の ON / OFF（OFF でも効果音は鳴ります） |
 | `//mbr lang auto` / `ja` / `en` | 表示の言語（初期値は auto = クライアントの言語。読み込み直しで切り替わります。引数なしで今の設定を表示） |
 | `//mbr test` | 表示テスト |
@@ -141,6 +148,8 @@ Windower4/addons/MBReadyTimer/
 ## 注意事項
 
 * 実測はアドオンを読み込み直すと消えます。数回詠唱すると、また覚えます。
+* 設定（`data/settings.xml`）を保存できなかったときは、コマンド・マウスで変えた位置・大きさなどを元に戻し、チャットで知らせます。ログアウト中も保存できないので、元に戻ります。
+* `data/settings.xml` が壊れていて読めないときは、初期値で起動し、「メモリのみで動作します」と知らせます。このときは変更を保存できず、読み込み直すと消えます。
 * 「着弾」は、自分の魔法の完了パケットを受け取った時刻です。
 * 詠唱を始めたあと、予測の時刻を 10 秒過ぎても着弾を受け取れなかったときは、表示を待機中に戻します。
 * 表示とチャットの文言は、ゲームクライアントの言語に合わせて日本語か英語になります。`//mbr lang ja` / `//mbr lang en` で固定できます（`//mbr lang auto` で元に戻る。読み込み直しで切り替わります）。英語クライアントでは未確認です。
@@ -160,6 +169,17 @@ Windower4/addons/MBReadyTimer/
 
 ## 更新履歴（Changelog）
 
+* v4.4.3（ゲーム内未確認の項目あり。READY 音の 0.2 秒先行は実機確認済み）
+  * READY の効果音だけを、硬直解除より早く鳴らす設定 `//mbr lead <秒>` を足した（0〜1 秒、初期値 0 = 今までどおり硬直解除と同時）。HUD の硬直・READY の表示は変わらない。`//mbr lead 0.2` なら、解除の 0.2 秒前に鳴る。
+  * メルトンも、抵抗された・効果がなかった・MB にならなかったときに「MB ならず」と記録する（v4.4.2 では MB のときだけ記録していた）。名指しで加えたのはメルトンだけで、ほかの暗黒魔法（ドレイン・アスピル・スタンなど）は今までどおり MB のときだけ記録する。
+* v4.4.2 (ゲーム内未確認)
+  * 連携のあとの結果に、MB にならないディア・バイオ・弱体・ドレインなどが「MB ならず」と入り、「MB 0 回」と出ていた不具合を直した。マジックバーストにならなかった魔法は、属性ダメージ魔法だけを記録する（条件は「学者の震天連携」の節）。再詠唱の残りの表示も、記録した魔法だけにした。
+  * 属性ダメージ魔法が抵抗された・効果がなかったときも「MB ならず」と記録する（これまでは記録しなかった）。
+* v4.4.1 (ゲーム内未確認)
+  * 設定の範囲の確かめを、起動時だけでなく、設定を読み直すたび（ログイン・ログアウト・別のキャラクターへの切り替え）にも行う。
+  * `data/settings.xml` が壊れていて読めないときは、「メモリのみで動作します」と知らせ、HUD はそのまま動かす。
+  * 読み込んだときにまだログインしていなくても、ログインしたら（毎秒確かめて）HUD と記録を始める。
+  * 説明を追加: ゾーン移動・ログアウト・`//mbr sc` の OFF では結果の 1 行を出さないこと、連携から 15 秒を過ぎた魔法は記録しないこと、保存に失敗すると位置・大きさなどが元に戻ること、ゾーン移動で再詠唱の見張りを消すこと。
 * v4.4.0 (2026-10-22)
   * 英語表示に対応。ゲームクライアントの言語に合わせて自動で切り替わる（`//mbr lang auto|ja|en`）。魔法名・連携名も英語で出す。英語クライアントでの動作は未確認。
 * v4.3.0 (2026-10-12)
@@ -232,6 +252,7 @@ No sound is included. Put any wav file at `Windower4/addons/MBReadyTimer/sounds/
 | `//mbr pos <x> <y>` | HUD position (you can also drag it) |
 | `//mbr size <n>` | HUD text size, 6-40 (the mouse wheel or the bottom-right corner also works) |
 | `//mbr sound` | READY sound on / off |
+| `//mbr lead <sec>` | Play the READY sound this many seconds before the lock ends (0 to 1, default 0; the HUD does not change, e.g. `//mbr lead 0.2`) |
 | `//mbr hud` | HUD on / off (the sound still plays) |
 | `//mbr lang auto` / `ja` / `en` | Display language (reload to apply; with no argument it shows the current setting) |
 
@@ -240,8 +261,28 @@ No sound is included. Put any wav file at `Windower4/addons/MBReadyTimer/sounds/
 - Measurements are lost when you reload the addon. It learns again after a few casts.
 - If no landing packet arrives by 10 s after the estimated landing time, the HUD goes back to idle.
 - Only skillchains made by your own spells are shown. Other players' skillchains are ignored.
+- The one-line skillchain result counts only spells that land within 15 s of the skillchain. Later spells are not recorded.
+- Which spells are recorded after a skillchain: any spell that bursts is recorded as "MB". A spell that does not burst is recorded as "no MB" only if it is elemental damage magic, whether it dealt damage, was resisted, or had no effect. A spell counts as elemental damage magic when its entry in Windower's `res/spells.lua` has `skill` 36 (Elemental Magic) or 39 (Ninjutsu), `element` 0-7 (Fire to Dark), an enemy in `targets`, and either no `status` (direct damage) or `status` 186 (Helix). Kaustra (502 in `res/spells.lua`) is also included by name (v4.4.3): it is dark magic (`skill` 37), and nothing in `res/spells.lua` tells it apart from Drain or Stun. Other spells (Dia, Bio, Slow and other enfeebles, Drain, Aspir, Stun, Burn and the other elemental enfeebles, Meteor, blue magic and so on) are not recorded unless they burst, and their recast is not shown.
+- A zone change, logout, or turning the mode off with `//mbr sc` within those 15 s drops the skillchain, and no result line is printed. A zone change or logout also clears the recast watch.
+- If the settings (`data/settings.xml`) cannot be saved, a change made by command or mouse (position, size and so on) is undone and the chat says so. Settings cannot be saved while logged out, so changes made then are undone too.
+- If `data/settings.xml` is broken and cannot be read, the addon starts with the defaults and says it is running from memory only. Changes then cannot be saved and are lost when you reload.
 - The HUD uses the Meiryo font by default. If your Windows does not have it, change `text.font` in `data/settings.xml`.
 - Third-party tools, Windower included, are prohibited by the FFXI Terms of Service. I cannot guarantee that this addon is allowed or that it will not be detected. Use it at your own risk; the author accepts no responsibility for any consequences.
+
+### Changelog
+
+- v4.4.3 (0.2-second sound lead tested in game; other changes not verified in game)
+  - New `//mbr lead <sec>` plays the READY sound earlier than the end of the lock (0 to 1 second, default 0 = same time as the lock ends, as before). The lock bar and the READY text on the HUD do not change. With `//mbr lead 0.2` the sound plays 0.2 s before the lock ends.
+  - Kaustra is now recorded as "no MB" when it is resisted, has no effect or does not burst (v4.4.2 recorded it only when it burst). Kaustra is the only spell added by name; other dark magic (Drain, Aspir, Stun and so on) is still recorded only when it bursts.
+- v4.4.2 (not tested in game)
+  - Fixed: Dia, Bio, enfeebles, Drain and similar spells that cannot burst were recorded as "no MB" after a skillchain, so the result line said "0 MB". Spells that do not burst are now recorded only if they are elemental damage magic (see Notes). The recast is shown only for recorded spells.
+  - An elemental damage spell that is resisted or has no effect is now recorded as "no MB" (it was skipped before).
+- v4.4.1 (not tested in game)
+  - Settings are range-checked not only at startup but also every time they are reloaded (login, logout, switching characters).
+  - If `data/settings.xml` is broken and cannot be read, the addon says it is running from memory only and keeps the HUD working.
+  - If the addon is loaded before you log in, it starts the HUD and recording once you are logged in (checked every second).
+  - Notes added: no result line after a zone change, logout or `//mbr sc` off; spells more than 15 s after the skillchain are not recorded; a failed save undoes position, size and other changes; a zone change clears the recast watch.
+- v4.4.0 (2026-10-22): English display, switched automatically by the client language (`//mbr lang auto|ja|en`). Not tested on the English client.
 
 Released under the MIT License. Author: hikaruoshino.
 

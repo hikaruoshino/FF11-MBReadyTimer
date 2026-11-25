@@ -1,5 +1,5 @@
 -- =============================================================================
--- MBReadyTimer.lua : FFXI 自分の魔法の着弾と、次の詠唱ができるまでの硬直を表示するアドオン (v4.4.0)
+-- MBReadyTimer.lua : FFXI 自分の魔法の着弾と、次の詠唱ができるまでの硬直を表示するアドオン (v4.4.3)
 -- =============================================================================
 -- 【概要】
 -- 自動キャストは一切行わない受動型アシストツール。
@@ -20,6 +20,8 @@
 --   - 自分の魔法で連携が起きたとき (2 発目) は、硬直が解けた時点で READY を鳴らす (ここからマジックバースト)
 --   - 自分の魔法で起きた連携だけ、連携からの経過時間と、その後の魔法がマジックバーストになったかを表示・記録する
 --     (自分で起こした連携なので、受付の長さが毎回ほぼ同じ。他の人の連携は今までどおり扱わない)
+--     「MB ならず」と記録するのは属性ダメージ魔法とメルトンだけ (v4.4.2・v4.4.3。条件は is_mb_damage_spell)。
+--     ディア・バイオ・弱体・ドレインなどは、マジックバーストになったときだけ記録する
 --   - 連携のあとに撃った魔法 (マジックバースト) の再詠唱の残りを表示する。溶解 → 核熱と続けて 3 回マジックバーストを
 --     入れる流れで、3 発目に 1 発目と同じ魔法 (ファイアV) をもう一度撃てるかを見るため
 --
@@ -30,7 +32,7 @@
 
 _addon.name     = "MBReadyTimer"
 _addon.author   = "hikaruoshino"
-_addon.version  = "4.4.0"
+_addon.version  = "4.4.3"
 _addon.commands = {"mbtimer", "mbr"}
 
 require("luau")
@@ -41,21 +43,66 @@ local res     = require("resources")
 -- -----------------------------------------------------------------------------
 -- デフォルト設定 (data/settings.xml)
 -- -----------------------------------------------------------------------------
+-- 数値の既定値 (読み込んだ設定の検証にも使う。config.load が defaults を書き換えても影響を受けないよう別に持つ)
+local DEF_X, DEF_Y, DEF_SIZE, DEF_PADDING = 500, 300, 11, 6
+local DEF_FC, DEF_POST, DEF_WINDOW = 0.80, 3.08, 10.0
+local DEF_LEAD, LEAD_MAX = 0.0, 1.0   -- READY の効果音を、硬直解除より早く鳴らす秒数 (既定は 0 = 硬直解除と同時)
+local SIZE_MIN, SIZE_MAX = 6, 40
+
 local defaults = {}
-defaults.pos = {x = 500, y = 300}
-defaults.text = {font = "Meiryo", size = 11, alpha = 255}
+defaults.pos = {x = DEF_X, y = DEF_Y}
+defaults.text = {font = "Meiryo", size = DEF_SIZE, alpha = 255}
 defaults.bg = {alpha = 180, red = 10, green = 10, blue = 15}
-defaults.padding = 6
-defaults.fc_rate = 0.80        -- ファストキャスト率 (上限80%)
-defaults.post_lock_sec = 3.08  -- 着弾から次の詠唱が可能になるまでの秒数
+defaults.padding = DEF_PADDING
+defaults.fc_rate = DEF_FC       -- ファストキャスト率 (上限80%)
+defaults.post_lock_sec = DEF_POST  -- 着弾から次の詠唱が可能になるまでの秒数
 defaults.sound_enabled = true
+defaults.sound_lead_sec = DEF_LEAD  -- READY の効果音だけを、硬直解除のこの秒数前に鳴らす (表示は変えない)
 defaults.show_hud = true
 defaults.sc_mode = true         -- 学者の震天連携の動き (1 発目は READY を鳴らさない・連携後の経過表示)
-defaults.sc_window_sec = 10.0   -- 連携からマジックバーストの受付が閉じるまでの目安 (表示の目盛りに使うだけ)
+defaults.sc_window_sec = DEF_WINDOW   -- 連携からマジックバーストの受付が閉じるまでの目安 (表示の目盛りに使うだけ)
 defaults.sc_report = true       -- 連携が終わったら、マジックバーストの結果をチャットログに 1 行出す
 defaults.lang = "auto"          -- 表示の言語: auto (クライアントの言語に合わせる) / ja / en
 
-local settings = config.load(defaults)
+-- 設定ファイルが壊れていて読み込めなくても、既定値で起動する。
+-- そのときの settings は libs/config.lua に登録されていない表なので、config.save・config.register は失敗する。
+-- settings_load_err に理由を残し、保存は試さずに「メモリのみで動作します」と知らせる (HUD は動かし続ける)
+local settings
+local settings_load_err = nil
+do
+    local ok, loaded = pcall(config.load, defaults)
+    if ok and type(loaded) == "table" then
+        settings = loaded
+    else
+        settings = defaults
+        settings_load_err = tostring(loaded)
+    end
+end
+
+-- 有限の数で、lo 以上 hi 以下なら数を返す。そうでなければ nil (負・NaN・無限・数でない値)
+local function in_range(v, lo, hi)
+    v = tonumber(v)
+    if v and v == v and v >= lo and v <= hi then return v end
+    return nil
+end
+
+-- 読み込んだ設定の数値を検証し、範囲外・NaN・無限は既定値に直す (範囲はコマンドで受け付ける範囲と同じ)。
+-- 起動時のほか、libs/config.lua が設定を読み直すたび (load・login・logout。別のキャラクターへの切り替えも) に呼ぶ
+local function sanitize_settings()
+    if type(settings.pos) ~= "table" then settings.pos = {} end
+    settings.pos.x = in_range(settings.pos.x, -100000, 100000) or DEF_X
+    settings.pos.y = in_range(settings.pos.y, -100000, 100000) or DEF_Y
+    if type(settings.text) ~= "table" then settings.text = {font = "Meiryo", alpha = 255} end
+    local size = in_range(settings.text.size, SIZE_MIN, SIZE_MAX)
+    settings.text.size = size and math.floor(size + 0.5) or DEF_SIZE
+    settings.padding = in_range(settings.padding, 0, 100) or DEF_PADDING
+    settings.fc_rate = in_range(settings.fc_rate, 0, 0.8) or DEF_FC
+    local post = in_range(settings.post_lock_sec, 0, 10)
+    settings.post_lock_sec = (post and post > 0) and post or DEF_POST
+    settings.sc_window_sec = in_range(settings.sc_window_sec, 3, 15) or DEF_WINDOW
+    settings.sound_lead_sec = in_range(settings.sound_lead_sec, 0, LEAD_MAX) or DEF_LEAD
+end
+sanitize_settings()
 
 -- 表示の言語。auto のときはゲームクライアントの言語 (windower.ffxi.get_info().language) に合わせる
 local LANG
@@ -88,9 +135,51 @@ local REFRESH_SEC = 0.05          -- HUD 更新間隔 (毎フレームの文字�
 local READY_SHOW_SEC = 2.5        -- READY 表示を続ける秒数
 local LAND_TIMEOUT_SEC = 10.0     -- 予測の着弾時刻をこの秒数過ぎても着弾パケットが来なければ、待機中に戻す (パケットの取りこぼし対策)
 local INTERRUPT_PARAM = 28787     -- category 8 の詠唱中断
-local MSG_MAGIC_BURST = 252       -- 「Magic Burst!」ダメージ
-local MSG_MAGIC_DAMAGE = 2        -- 魔法の通常のダメージ (マジックバーストにならなかった)
-local IMMANENCE_BUFF = 470        -- 震天動地の章
+-- 自分の魔法がマジックバーストになったときのメッセージ (res/action_messages.lua で意味を確かめたものだけ)
+--   カテゴリごと (いまは 4 = 魔法の完了だけ)。最初の対象は「${actor} casts ${spell}.」付き、範囲の追加対象は無しのメッセージになる
+--   マジックバーストでない結果は、魔法の系統 (is_mb_damage_spell) で記録するかを決める (v4.4.2)
+local RESULT_MB = 1
+local RESULT_BY_CATEGORY = {
+    [4] = {
+        -- マジックバースト: ダメージ (252 最初の対象 / 265 追加対象)・状態 (268・271 / 269・272)・吸収 (274 HP・275 MP)
+        [252] = RESULT_MB, [265] = RESULT_MB,
+        [268] = RESULT_MB, [269] = RESULT_MB, [271] = RESULT_MB, [272] = RESULT_MB,
+        [274] = RESULT_MB, [275] = RESULT_MB,
+    },
+}
+local NO_RESULTS = {}
+-- 連携のあとに、マジックバーストにならなかったとき「MB ならず」と記録する魔法 (属性ダメージ魔法) の条件。
+-- res/spells.lua の項目で決める:
+--   - skill が 36 (精霊魔法) か 39 (忍術) (res/skills.lua)
+--   - element が 0〜7 (res/elements.lua の火〜闇。15 = なし は連携の属性と合わない)
+--   - targets に敵 (32) を含む
+--   - status が無い (直接のダメージ) か、186 (res/buffs.lua の「計略」。計略は着弾でダメージを与える)
+--   名指しで加えるのはメルトン (502) の 1 件だけ (v4.4.3・ユーザー決定)。メルトンは暗黒魔法 (skill 37) で、
+--   res の項目ではドレイン・スタンなどと区別できないため
+--   ほかの魔法 (ディア・バイオ・弱体・ドレイン・アスピル・スタン・バーンなどの精霊の弱体・青魔法など) は、
+--   マジックバーストのメッセージが届いたときだけ記録する (外れは記録せず、再詠唱も見張らない)
+local MB_DAMAGE_SKILLS = {[36] = true, [39] = true}
+local MB_DAMAGE_NAMED = {[502] = true}   -- メルトン (res/spells.lua の 502)
+local HELIX_STATUS = 186
+local TARGET_ENEMY = 32
+local mb_damage_cache = {}   -- [魔法の番号] = true / false (自分の魔法の完了ごとに res を引き直さない)
+local function is_mb_damage_spell(id)
+    local cached = mb_damage_cache[id]
+    if cached ~= nil then return cached end
+    local spell = id and res.spells[id]
+    local yes = false
+    if spell and MB_DAMAGE_NAMED[id] then
+        yes = true
+    elseif spell and MB_DAMAGE_SKILLS[spell.skill] then
+        local element, targets = tonumber(spell.element), tonumber(spell.targets) or 0
+        yes = element ~= nil and element >= 0 and element <= 7
+            and math.floor(targets / TARGET_ENEMY) % 2 == 1
+            and (spell.status == nil or spell.status == HELIX_STATUS)
+    end
+    if id then mb_damage_cache[id] = yes end
+    return yes
+end
+local IMMANENCE_BUFF = 470       -- 震天動地の章
 local SC_TRACK_SEC = 15.0         -- 連携のあと、この秒数まで自分の魔法の結果を記録する (受付が閉じた後の 1 発も残すため)
 local RECAST_POLL_SEC = 0.25      -- 再詠唱の残りを読み直す間隔 (全魔法の表を取るので、毎フレームは読まない)
 local RECAST_KEEP_SEC = 8.0       -- 再詠唱が明けてから、この秒数だけ「撃てます」を表示して消す
@@ -126,6 +215,14 @@ local function chat_msg(msg, color)
     windower.add_to_chat(color, tostring(msg))
 end
 
+-- 設定ファイルを読めなかった: 保存できない理由を起動時に 1 回知らせる
+local MEMORY_ONLY_MSG
+if settings_load_err then
+    MEMORY_ONLY_MSG = L("設定ファイル (data/settings.xml) を読めなかったため、設定を保存できません。メモリのみで動作します (変更は読み込み直すと消えます)",
+        "Could not read the settings file (data/settings.xml), so settings cannot be saved. Running from memory only (changes are lost when the addon is reloaded)")
+    chat_msg("[MBReadyTimer] " .. MEMORY_ONLY_MSG .. ": " .. settings_load_err, 167)
+end
+
 local function color_text(str, r, g, b)
     return string.format("\\cs(%d,%d,%d)%s\\cr", r, g, b, tostring(str or ""))
 end
@@ -155,6 +252,7 @@ local LEARN_MAX_RATIO = 1.2       --   (クイックマジック・大きなラ�
 local SPEEDUP_BUFFS = {[362] = true, [363] = true}  -- 電光石火の章 / 疾風迅雷の章 (詠唱時間半減。覚えない)
 
 local learned = {}                -- [系統] = {ratio = 比率, count = 回数, by_base = {[基本詠唱時間] = 秒}}
+local learned_owner = nil         -- learned を覚えたキャラクターの名前 (別のキャラクターの実測を混ぜない)
 
 local function blend(old, new)
     if not old then return new end
@@ -211,17 +309,46 @@ local state = {
         ready_signaled = false,
         immanence = false, -- 震天動地の章の効果中に詠唱した魔法か
         sc_name = nil,     -- この魔法で起きた連携の名前 (起きなければ nil)
+        gen = 0,           -- 詠唱ごとの番号 (テストの着弾予約が、あとの実際の詠唱を着弾させないように照合する)
+        test = false,      -- //mbr test の模擬表示か
+        spell_id = nil,    -- 詠唱開始で受け取った魔法の番号 (完了・中断の照合に使う)
+        target_id = nil,   -- 詠唱開始で受け取った対象の ID (完了の照合に使う)
+        measured = nil,    -- この詠唱の「開始 → 着弾」の秒数 (HUD の表示用)
     },
-    sc = nil,                  -- 自分の魔法で起きた連携 {name = 名前, at = 時刻, casts = {{name, t, mb}, ...}}
+    sc = nil,                  -- 自分の魔法で起きた連携 {name = 名前, at = 時刻, target_id = 連携が起きた敵の ID, casts = {{name, t, mb}, ...}, seen = 敵を取得できたか}
     recast_watch = {},         -- 連携のあとに撃った魔法の再詠唱 [魔法の番号] = {name, landed_at, remaining, polled_at, total, ready_at}
     last_recast_poll = 0,
-    last_measured_cast = nil,  -- 直近の実測詠唱時間 (FC の確認用)
+    last_mob_poll = 0,         -- 連携の対象の敵を最後に確かめた時刻
+    -- 直近の実測 (status の FC の確認用)。実測した魔法の名前・基本詠唱時間と組で持つ (テスト表示の値は入れない)
+    last_measured_name = nil,
+    last_measured_base = nil,
+    last_measured_sec = nil,
     mb_success_at = nil,       -- 自分の魔法がマジックバーストになった時刻
     last_refresh = 0,
     last_error_at = -100,
 }
 
 local hud = texts.new("", settings)
+
+-- libs/config.lua が設定を読み直したら (load・login・logout)、範囲外の値をもう一度直し、HUD に当て直す
+-- (読み直しの後に texts が範囲外の値を HUD に当てていることがあるため。呼ばれる順番は決まっていない)
+if not settings_load_err then
+    local ok_reg, err_reg = pcall(config.register, settings, function()
+        -- ここでの例外は libs/config.lua の読み直し (ほかの登録も) を止めるので、外へ出さない
+        local ok, err = pcall(function()
+            sanitize_settings()
+            hud:pos(settings.pos.x, settings.pos.y)
+            hud:size(settings.text.size)
+            hud:pad(settings.padding)
+        end)
+        if not ok then
+            chat_msg("[MBReadyTimer] " .. L("設定の読み直しの処理エラー: ", "settings reload error: ") .. tostring(err), 167)
+        end
+    end)
+    if not ok_reg then
+        chat_msg("[MBReadyTimer] " .. L("設定の読み直しの登録に失敗しました: ", "Could not register for settings reloads: ") .. tostring(err_reg), 167)
+    end
+end
 
 -- 大きさ変更の目印「◢」: HUD の右下の角に重ねて表示する別のテキスト (背景なし・移動不可)
 local GRIP_COLOR     = {150, 150, 150}  -- 通常
@@ -287,7 +414,7 @@ local function build_cast_lines(lines, now)
     if since_land < post then
         -- 2. 着弾後の硬直中
         table.insert(lines, string.format(L("魔法: %s (着弾済 / 実測詠唱%.2fs)", "Spell: %s (landed / measured cast %.2fs)"),
-            color_text(c.spell_name, 255, 150, 150), state.last_measured_cast or 0))
+            color_text(c.spell_name, 255, 150, 150), c.measured or 0))
         table.insert(lines, string.format(L("状態: %s [%s] 次の詠唱まで%.2fs", "Status: %s [%s] next cast in %.2fs"),
             color_text(L("硬直中", "Locked"), 255, 80, 80), bar(since_land / math.max(post, 0.01), 15, "#"), post - since_land))
         if settings.sc_mode and c.sc_name then
@@ -336,14 +463,13 @@ local function build_recast_lines(lines, now)
     table.sort(ids, function(a, b) return state.recast_watch[a].landed_at < state.recast_watch[b].landed_at end)
     for _, id in ipairs(ids) do
         local w = state.recast_watch[id]
-        if w.remaining then
-            -- 読み直すまでの間は、前に読んだ値から経過分を引いて表示する
-            local left = w.remaining - (now - w.polled_at)
-            if left > 0.05 then
-                table.insert(lines, string.format(L("再詠唱: %s あと%.1fs", "Recast: %s %.1fs left"), color_text(w.name, 255, 150, 150), left))
-            else
-                table.insert(lines, string.format(L("再詠唱: %s %s", "Recast: %s %s"), color_text(w.name, 50, 255, 100), color_text(L("撃てます", "ready"), 50, 255, 100)))
-            end
+        if w.ready_at then
+            -- 「撃てます」は、再詠唱の表で 0 を確かめたときだけ出す
+            table.insert(lines, string.format(L("再詠唱: %s %s", "Recast: %s %s"), color_text(w.name, 50, 255, 100), color_text(L("撃てます", "ready"), 50, 255, 100)))
+        elseif w.remaining then
+            -- 読み直すまでの間は、前に読んだ値から経過分を引いて表示する (0 を確かめるまでは 0.0 で止める)
+            local left = math.max(0, w.remaining - (now - w.polled_at))
+            table.insert(lines, string.format(L("再詠唱: %s あと%.1fs", "Recast: %s %.1fs left"), color_text(w.name, 255, 150, 150), left))
         end
     end
 end
@@ -353,20 +479,25 @@ local function poll_recasts(now)
     if next(state.recast_watch) == nil then return end
     if now - state.last_recast_poll < RECAST_POLL_SEC then return end
     state.last_recast_poll = now
-    local recasts = windower.ffxi.get_spell_recasts() or {}
+    local recasts = windower.ffxi.get_spell_recasts()
+    if type(recasts) ~= "table" then recasts = NO_RESULTS end   -- 表が取れないときは、全部を「未知」として扱う (空の表を作らない)
     for id, w in pairs(state.recast_watch) do
-        local remaining = (tonumber(recasts[id]) or 0) / 60   -- get_spell_recasts は 1/60 秒単位
-        w.remaining, w.polled_at = remaining, now
-        if remaining > 0 then
-            w.ready_at = nil
-            if not w.total then
-                w.total = remaining + (now - w.landed_at)
-                if settings.sc_report then
-                    chat_msg(string.format(L("[MBReadyTimer] %s の再詠唱時間: %.1f秒 (着弾から)", "[MBReadyTimer] %s recast: %.1fs (from landing)"), w.name, w.total))
+        local raw = tonumber(recasts[id])
+        -- 項目が無い (未知) ときは「0 = 撃てる」とみなさず、前の値のままにする
+        if raw then
+            local remaining = raw / 60   -- get_spell_recasts は 1/60 秒単位
+            w.remaining, w.polled_at = remaining, now
+            if remaining > 0 then
+                w.ready_at = nil
+                if not w.total then
+                    w.total = remaining + (now - w.landed_at)
+                    if settings.sc_report then
+                        chat_msg(string.format(L("[MBReadyTimer] %s の再詠唱時間: %.1f秒 (着弾から)", "[MBReadyTimer] %s recast: %.1fs (from landing)"), w.name, w.total))
+                    end
                 end
+            else
+                w.ready_at = w.ready_at or now
             end
-        else
-            w.ready_at = w.ready_at or now
         end
         if (w.ready_at and now - w.ready_at > RECAST_KEEP_SEC) or now - w.landed_at > RECAST_MAX_SEC then
             state.recast_watch[id] = nil
@@ -378,7 +509,7 @@ end
 local function close_sc()
     local sc = state.sc
     state.sc = nil
-    if not (sc and settings.sc_report and #sc.casts > 0) then return end
+    if not (sc and settings.sc_mode and settings.sc_report and #sc.casts > 0) then return end
     local parts, mb_count = {}, 0
     for _, cast in ipairs(sc.casts) do
         if cast.mb then mb_count = mb_count + 1 end
@@ -387,12 +518,42 @@ local function close_sc()
     chat_msg(string.format(L("[MBReadyTimer] 連携・%s: MB %d 回 / %s", "[MBReadyTimer] Skillchain %s: %d MB / %s"), sc.name, mb_count, table.concat(parts, " -> ")))
 end
 
+-- 連携の対象が倒れた・消えた: 連携の表示 (経過と READY の連携の文言) と連携向けの案内を終える。
+-- 詠唱の硬直の表示は続ける (この詠唱は通常の READY として扱う)
+local function end_sc_target()
+    close_sc()
+    local c = state.cast
+    if c.sc_name then
+        c.sc_name = nil
+        c.immanence = false   -- 連携の 2 発目の印を外したあとに「震天 1 発目」と出さない
+    end
+end
+
+-- 連携の対象の敵を確かめる (RECAST_POLL_SEC ごと・連携の追跡中だけ)。
+-- HP 0 なら倒れた。一度取得できた敵が取得できなくなったら消えた。最初から取得できないだけでは終えない
+local function check_sc_target(now)
+    local sc = state.sc
+    if not (sc and sc.target_id) or now - state.last_mob_poll < RECAST_POLL_SEC then return end
+    state.last_mob_poll = now
+    local mob = windower.ffxi.get_mob_by_id(sc.target_id)
+    if mob then
+        if tonumber(mob.hpp) == 0 then
+            end_sc_target()
+        else
+            sc.seen = true
+        end
+    elseif sc.seen then
+        end_sc_target()
+    end
+end
+
 -- 時間の経過で変わる状態を進める。HUD の表示とは別に毎回行う (HUD を消していても READY の効果音を鳴らすため)
 local function update_state(now)
     local c = state.cast
     if state.sc and now - state.sc.at > SC_TRACK_SEC then
         close_sc()
     end
+    check_sc_target(now)
     if settings.sc_mode then poll_recasts(now) end
     if c.active and not c.landed_at and now - c.start > c.predicted + LAND_TIMEOUT_SEC then
         c.active = false
@@ -400,7 +561,8 @@ local function update_state(now)
     end
     if c.active and c.landed_at then
         local since_ready = now - c.landed_at - num(settings.post_lock_sec, 3.08)
-        if since_ready >= 0 and not c.ready_signaled then
+        -- 効果音だけ sound_lead_sec 早く鳴らす (HUD の硬直・READY の表示は since_ready のまま)
+        if since_ready >= -num(settings.sound_lead_sec, DEF_LEAD) and not c.ready_signaled then
             c.ready_signaled = true
             -- 震天の 1 発目 (連携にならなかった震天中の魔法) では鳴らさない。連携が起きた魔法では鳴らす
             if not (settings.sc_mode and c.immanence and not c.sc_name) then
@@ -442,10 +604,33 @@ local function report_error(now, label, err)
     end
 end
 
+-- ログイン中だけ HUD を描く (起動時は get_info で決め、login / logout で切り替える)。
+-- 起動時にまだ logged_in が偽で、login が来ないまま入っていたときのため、ログアウト中は毎秒 get_info を見直す
+-- 見直すのは起動時から login / logout が一度も来ていない間だけ (logout の直後に get_info がまだ真を返して、
+-- ログイン中に戻してしまうのを避ける。logout の後は login のイベントで戻す)
+local LOGIN_POLL_SEC = 1.0
+local function read_logged_in()
+    local ok, info = pcall(windower.ffxi.get_info)
+    return ok and type(info) == "table" and info.logged_in and true or false
+end
+local logged_in = read_logged_in()
+local login_poll = not logged_in
+local next_login_poll = 0
+
 windower.register_event("prerender", function()
     local now = os.clock()
     if now - state.last_refresh < REFRESH_SEC then return end
     state.last_refresh = now
+
+    if not logged_in then
+        if hud:visible() then hud:hide() end
+        if grip:visible() then grip:hide() end
+        if not login_poll or now < next_login_poll then return end
+        next_login_poll = now + LOGIN_POLL_SEC
+        if not read_logged_in() then return end
+        logged_in = true      -- 起動時から一度もログインしていないので、捨てる状態は無い (自分の ID もまだ覚えていない)
+        login_poll = false
+    end
 
     local ok, err = pcall(update_state, now)
     if not ok then report_error(now, L("状態更新エラー", "state update error"), err) end
@@ -463,9 +648,18 @@ end)
 -- アクション検知
 -- -----------------------------------------------------------------------------
 local function on_own_cast_start(act)
+    local c = state.cast
     if act.param == INTERRUPT_PARAM then
-        -- 詠唱中断: 硬直は発生しないものとして表示を止める
-        state.cast.active = false
+        -- 中断の魔法が判別でき、今の詠唱の魔法と違うときは、遅れて届いた前の詠唱の中断なので今の詠唱は止めない
+        -- (中断の対象 ID は何が入るか確かめられていないので、照合には使わない)
+        local t1 = act.targets and act.targets[1]
+        local a1 = t1 and t1.actions and t1.actions[1]
+        local sid = a1 and tonumber(a1.param)
+        if sid and sid > 0 and c.spell_id and sid ~= c.spell_id and res.spells[sid] then return end
+        -- 詠唱中断: 硬直は発生しないものとして表示を止める (テストの着弾予約も無効にする)
+        c.active = false
+        c.gen = c.gen + 1
+        c.test = false
         return
     end
     local target = act.targets and act.targets[1]
@@ -474,7 +668,8 @@ local function on_own_cast_start(act)
     if not spell then return end
 
     local base = num(spell.cast_time, 3.0)
-    local c = state.cast
+    c.gen = c.gen + 1      -- 前の詠唱 (テスト表示を含む) の着弾予約を無効にする
+    c.test = false
     c.active = true
     c.spell_name = res_name(spell) or "?"
     c.base = base
@@ -482,51 +677,91 @@ local function on_own_cast_start(act)
     c.start = os.clock()
     c.predicted, c.from_learned = predict_cast(c.skill, base)
     c.landed_at = nil
+    c.measured = nil
     c.ready_signaled = false
     c.immanence = false
     c.sc_name = nil
+    c.spell_id = action.param
+    c.target_id = target.id
 
     -- 電光石火の章・疾風迅雷の章 (詠唱時間半減) の間の実測は、普段の予測に混ぜない
     -- (get_player は自分の詠唱開始のときだけ呼ぶ)
     c.learnable = true
     local player = windower.ffxi.get_player()
+    -- 別のキャラクターに変わっていたら、前のキャラクターの実測を消す (ログインのイベントを取りこぼしても混ぜない)
+    local name = player and player.name
+    if name and name ~= learned_owner then
+        if learned_owner then
+            learned = {}
+            state.last_measured_name, state.last_measured_base, state.last_measured_sec = nil, nil, nil
+            c.predicted, c.from_learned = predict_cast(c.skill, base)
+        end
+        learned_owner = name
+    end
     for _, buff in ipairs(player and player.buffs or {}) do
         if SPEEDUP_BUFFS[buff] then c.learnable = false end
         if buff == IMMANENCE_BUFF then c.immanence = true end
     end
     -- 震天で新しい連携を組み始めたら、前の連携の記録はここで閉じる
-    if c.immanence and state.sc then close_sc() end
+    if settings.sc_mode and c.immanence and state.sc then close_sc() end
 end
 
 local function on_own_cast_finish(act, now)
     local c = state.cast
-    if c.active and not c.landed_at then
-        c.landed_at = now
-        state.last_measured_cast = now - c.start
-        if c.learnable then learn_cast(c.skill, c.base, state.last_measured_cast) end
-    end
-    local sc_name, result = nil, nil
-    for _, target in ipairs(act.targets or {}) do
+    -- prerender が遅れても、集計の期限 (SC_TRACK_SEC) を過ぎた連携には記録しない
+    if state.sc and now - state.sc.at > SC_TRACK_SEC then close_sc() end
+    -- 対象ごとに結果を見る。連携は最初に連携が起きた対象に固定し、記録はその敵の結果だけを使う
+    local results = RESULT_BY_CATEGORY[act.category] or NO_RESULTS
+    local tracked_id = state.sc and state.sc.target_id
+    -- 連携の追跡中だけ、この魔法が属性ダメージ魔法か (外れを「MB ならず」と記録するか) を引く
+    local mb_damage = tracked_id ~= nil and is_mb_damage_spell(act.param)
+    local sc_name, sc_target, result = nil, nil, nil
+    local target_ok = (c.target_id == nil)   -- 詠唱の対象が完了の対象 (範囲魔法は追加対象も含む) にいるか
+    local targets = act.targets
+    if type(targets) ~= "table" then targets = NO_RESULTS end
+    for _, target in ipairs(targets) do
+        if target.id == c.target_id then target_ok = true end
         local action = target.actions and target.actions[1]
         if action then
-            if action.message == MSG_MAGIC_BURST then
-                state.mb_success_at = now
-                result = true
-            elseif action.message == MSG_MAGIC_DAMAGE and result == nil then
-                result = false
+            local kind = results[action.message]
+            if kind == RESULT_MB then state.mb_success_at = now end
+            if not sc_name and action.has_add_effect and SKILLCHAIN_MESSAGES[action.add_effect_message] then
+                sc_name, sc_target = SKILLCHAIN_MESSAGES[action.add_effect_message], target.id
             end
-            if action.has_add_effect and SKILLCHAIN_MESSAGES[action.add_effect_message] then
-                sc_name = SKILLCHAIN_MESSAGES[action.add_effect_message]
+            -- 連携の敵への結果: マジックバーストはどの魔法でも記録する。
+            -- それ以外 (ダメージ・抵抗・効果なしなど) は、属性ダメージ魔法のときだけ「MB ならず」と記録する
+            if tracked_id ~= nil and target.id == tracked_id then
+                if kind == RESULT_MB then
+                    result = true
+                elseif mb_damage and result == nil and (tonumber(action.message) or 0) > 0 then
+                    result = false
+                end
             end
         end
     end
+    -- 今の詠唱の完了か: 魔法の番号と対象が詠唱開始と合うときだけ、着弾・硬直・実測に使う。
+    -- 合わない完了 (遅れて届いた前の詠唱・開始を取りこぼした詠唱) は、連携と MB の記録だけに使う。
+    -- テスト表示の最中は、届いた着弾をテストの詠唱に当てはめない (実測に混ぜない)
+    local matched = c.active and not c.landed_at and not c.test and c.spell_id == act.param and target_ok
+    if matched then
+        c.landed_at = now
+        c.measured = now - c.start
+        state.last_measured_name, state.last_measured_base, state.last_measured_sec = c.spell_name, c.base, c.measured
+        if c.learnable then learn_cast(c.skill, c.base, c.measured) end
+    end
+    -- 震天の印は、開始と対応する完了のときだけ使う (対応しない完了は震天の外の魔法として扱う)
+    local immanence = matched and c.immanence
+
+    -- 震天連携の動きを切っているときは、連携の追跡・記録・通知をしない
+    if not settings.sc_mode then return end
 
     if sc_name then
         -- 自分の魔法で連携が起きた: ここからの経過と、後に続く魔法の結果を記録する
         if state.sc then close_sc() end
-        c.sc_name = sc_name
-        state.sc = {name = sc_name, at = now, casts = {}}
-    elseif state.sc and result ~= nil and not c.immanence then
+        if matched then c.sc_name = sc_name end
+        state.sc = {name = sc_name, at = now, target_id = sc_target, casts = {}}
+        state.last_mob_poll = 0
+    elseif state.sc and result ~= nil and not immanence then
         -- 連携のあとに撃った魔法: マジックバーストになったかどうかを残す
         local spell = res.spells[act.param]
         local name = res_name(spell) or c.spell_name
@@ -547,17 +782,46 @@ local function get_player_id()
     return player_id
 end
 
-windower.register_event("action", function(act)
-    -- 自分の詠唱開始 (8) と魔法の完了 (4) だけを見る。周りの人の行動はここで捨てる
-    if act.category ~= 8 and act.category ~= 4 then return end
-    local ok, err = pcall(function()
-        if act.actor_id ~= get_player_id() then return end
-        if act.category == 8 then
+-- 連携を起こせる行動の種類 (libs/actions.lua: 3 = WS・4 = 魔法・11 = モンスターの技・13 = ペットの技)
+local SC_CHAIN_CATEGORIES = {[3] = true, [4] = true, [11] = true, [13] = true}
+
+-- 追跡中の敵に、ほかの行動 (他者の技・魔法など) で新しい連携が起きたら、旧い集計を閉じる
+-- (以前の自分の連携に、次の MB を数えない)
+local function close_if_new_chain(act)
+    local tracked = state.sc.target_id
+    local targets = act.targets
+    if tracked == nil or type(targets) ~= "table" then return end
+    for _, target in ipairs(targets) do
+        if target.id == tracked then
+            local action = target.actions and target.actions[1]
+            if action and action.has_add_effect and SKILLCHAIN_MESSAGES[action.add_effect_message] then
+                close_sc()
+                return
+            end
+        end
+    end
+end
+
+local function handle_action(act, category)
+    if (category == 8 or category == 4) and act.actor_id == get_player_id() then
+        if category == 8 then
             on_own_cast_start(act)
         else
             on_own_cast_finish(act, os.clock())
         end
-    end)
+        return
+    end
+    if state.sc and SC_CHAIN_CATEGORIES[category] then close_if_new_chain(act) end
+end
+
+windower.register_event("action", function(act)
+    -- ログイン中だけ受け付ける。見るのは自分の詠唱開始 (8) と魔法の完了 (4)、連携の追跡中は連携を起こせる行動だけ。
+    -- それ以外の周りの人の行動はここで捨てる (型も pcall の前に確かめる)
+    if not logged_in or type(act) ~= "table" then return end
+    local category = act.category
+    if type(category) ~= "number" then return end
+    if category ~= 8 and category ~= 4 and not (state.sc and SC_CHAIN_CATEGORIES[category]) then return end
+    local ok, err = pcall(handle_action, act, category)
     if not ok then report_error(os.clock(), L("アクション処理エラー", "action error"), err) end
 end)
 
@@ -567,7 +831,6 @@ end)
 --   ・HUD の右下の角をクリック＆ドラッグ : 大きさを変更 (角以外のドラッグは従来どおり移動)
 -- -----------------------------------------------------------------------------
 local MOUSE_MOVE, MOUSE_LEFT_DOWN, MOUSE_LEFT_UP, MOUSE_WHEEL = 0, 1, 2, 10
-local SIZE_MIN, SIZE_MAX = 6, 40
 local RESIZE_HANDLE_PX = 18      -- 右下の角とみなす範囲 (px)
 
 local resize = nil               -- ドラッグで大きさを変えている最中の情報
@@ -585,10 +848,39 @@ local function set_size(size)
     return size
 end
 
--- 角の判定で一時的に止めた「ドラッグで移動」を元に戻してから保存する
+-- 角の判定で一時的に止めた「ドラッグで移動」を元に戻してから保存する。保存できたかを返す (保存先を開けなくても止まらない)
+-- libs/config.lua の save はログアウト中は何もせずに戻るので、ログイン中かを先に確かめて失敗として返す
+-- 戻り値の 3 つ目: 設定ファイルを読めなかった (メモリのみで動作中) なら true。このときは保存を試さない
 local function save_settings()
     if hud:draggable() ~= move_allowed then hud:draggable(move_allowed) end
-    config.save(settings)
+    if settings_load_err then return false, MEMORY_ONLY_MSG, true end
+    local ok_info, info = pcall(windower.ffxi.get_info)
+    if not (ok_info and type(info) == "table" and info.logged_in) then
+        return false, L("ログアウト中は保存できません", "cannot save while logged out")
+    end
+    return pcall(config.save, settings)
+end
+
+-- コマンドの変更を保存する。保存できなければ revert で変更を元に戻し、チャットで知らせる
+-- メモリのみで動作中は、変更を元に戻さずに使い続け、保存できない理由を知らせる
+local function commit_settings(revert)
+    local ok, err, memory_only = save_settings()
+    if ok then return true end
+    if memory_only then
+        chat_msg("[MBReadyTimer] " .. tostring(err), 167)
+        return true
+    end
+    if revert then revert() end
+    chat_msg(L("[MBReadyTimer] 設定を保存できませんでした。変更を元に戻しました: ", "[MBReadyTimer] Could not save the settings. The change was reverted: ") .. tostring(err), 167)
+    return false
+end
+
+-- マウスでの大きさ変更は回数が多いので、メモリのみで動作中の知らせは 1 回だけ出す (大きさは元に戻さない)
+local memory_only_told = false
+local function tell_memory_only()
+    if memory_only_told then return end
+    memory_only_told = true
+    chat_msg("[MBReadyTimer] " .. tostring(MEMORY_ONLY_MSG), 167)
 end
 
 local function in_resize_handle(x, y)
@@ -601,6 +893,21 @@ end
 
 -- HUD のマウス操作 (true を返すとクリックをゲームに渡さない)
 local function on_mouse(mtype, x, y, delta, blocked)
+    -- 左ボタンの解放は、ほかのアドオンが止めた (blocked) ときや HUD を隠したあとでも、大きさ変更を必ず終える
+    if mtype == MOUSE_LEFT_UP and resize then
+        local original = resize.size
+        resize = nil
+        local ok, err, memory_only = save_settings()
+        if memory_only then
+            tell_memory_only()
+        elseif not ok then
+            -- 保存できなければ、大きさを変える前に戻す (メモリ上の値と表示を、保存されている値にそろえる)
+            set_size(original)
+            update_grip()
+            report_error(os.clock(), L("設定の保存エラー (大きさを元に戻しました)", "settings save error (size reverted)"), err)
+        end
+        return true
+    end
     if blocked or not settings.show_hud then return end
 
     if mtype == MOUSE_MOVE then
@@ -631,18 +938,18 @@ local function on_mouse(mtype, x, y, delta, blocked)
             return true
         end
 
-    elseif mtype == MOUSE_LEFT_UP then
-        if resize then
-            resize = nil
-            save_settings()
-            return true
-        end
-
     elseif mtype == MOUSE_WHEEL then
         if hud:hover(x, y) then
             local step = (tonumber(delta) or 0) > 0 and 1 or -1
-            set_size(current_size() + step)
-            save_settings()
+            local original = current_size()
+            set_size(original + step)
+            local ok, err, memory_only = save_settings()
+            if memory_only then
+                tell_memory_only()
+            elseif not ok then
+                set_size(original)
+                report_error(os.clock(), L("設定の保存エラー (大きさを元に戻しました)", "settings save error (size reverted)"), err)
+            end
             update_grip()
             return true
         end
@@ -661,22 +968,58 @@ end)
 -- -----------------------------------------------------------------------------
 -- クリーンアップ
 -- -----------------------------------------------------------------------------
+-- ゾーン移動・ログアウト: 詠唱・連携・再詠唱の見張り・大きさ変更の途中・テストの着弾予約を捨て、HUD を隠す
+-- (移動先で前の連携を表示したり、移動先の着弾を前の連携に数えたりしない。連携の結果の 1 行も出さない)
 local function reset_state()
-    state.cast.active = false
+    local c = state.cast
+    c.active = false
+    c.landed_at = nil
+    c.gen = c.gen + 1
+    c.test = false
     state.mb_success_at = nil
+    state.sc = nil
+    state.recast_watch = {}
+    if resize then resize = nil end
+    if hud:draggable() ~= move_allowed then hud:draggable(move_allowed) end
+    grip_hot = false
+    if hud:visible() then hud:hide() end
+    if grip:visible() then grip:hide() end
 end
 
-windower.register_event("zone change", reset_state)
-windower.register_event("logout", function()
-    reset_state()
-    player_id = nil   -- 別のキャラクターでログインし直したときのため
+windower.register_event("zone change", function()
+    local ok, err = pcall(reset_state)
+    if not ok then report_error(os.clock(), L("ゾーン移動の処理エラー", "zone change error"), err) end
 end)
-windower.register_event("unload", function()
-    if hud then
-        if hud:draggable() ~= move_allowed then hud:draggable(move_allowed) end
-        hud:hide()
+-- ログイン: ログアウト中に届いたものや前のキャラクターの状態を残さない。別のキャラクターなら実測も消す
+windower.register_event("login", function(name)
+    logged_in = true
+    login_poll = false
+    player_id = nil
+    if learned_owner and type(name) == "string" and name ~= learned_owner then
+        learned = {}
+        learned_owner = nil
+        state.last_measured_name, state.last_measured_base, state.last_measured_sec = nil, nil, nil
     end
-    if grip then grip:destroy() end
+    local ok, err = pcall(reset_state)
+    if not ok then report_error(os.clock(), L("ログインの処理エラー", "login error"), err) end
+end)
+windower.register_event("logout", function()
+    logged_in = false
+    login_poll = false
+    player_id = nil   -- 別のキャラクターでログインし直したときのため
+    local ok, err = pcall(reset_state)
+    if not ok then report_error(os.clock(), L("ログアウトの処理エラー", "logout error"), err) end
+end)
+-- アンロード: 片付けを 1 つずつ行い、どれかが失敗しても残りを止めない
+windower.register_event("unload", function()
+    -- 予約済みのテスト表示の着弾を無効にする (詠唱の番号を進める)
+    state.cast.gen = state.cast.gen + 1
+    state.cast.test = false
+    pcall(function()
+        if hud:draggable() ~= move_allowed then hud:draggable(move_allowed) end
+    end)
+    pcall(function() hud:destroy() end)
+    pcall(function() grip:destroy() end)
 end)
 
 -- -----------------------------------------------------------------------------
@@ -687,25 +1030,41 @@ windower.register_event("addon command", function(cmd, ...)
     cmd = cmd and cmd:lower()
 
     if cmd == "pos" and tonumber(args[1]) and tonumber(args[2]) then
+        -- 保存できたときだけ HUD を動かす (失敗したら設定値を元に戻す。HUD はもとの位置のまま)
+        local old_x, old_y = settings.pos.x, settings.pos.y
         settings.pos.x = tonumber(args[1])
         settings.pos.y = tonumber(args[2])
-        save_settings()
+        if not commit_settings(function() settings.pos.x, settings.pos.y = old_x, old_y end) then return end
         hud:pos(settings.pos.x, settings.pos.y)
         chat_msg(string.format(L("[MBReadyTimer] HUD位置を変更しました: X=%d, Y=%d", "[MBReadyTimer] HUD position set: X=%d, Y=%d"), settings.pos.x, settings.pos.y))
 
     elseif cmd == "post" and tonumber(args[1]) then
         local sec = tonumber(args[1])
         if sec > 0 and sec <= 10 then
+            local old = settings.post_lock_sec
             settings.post_lock_sec = sec
-            save_settings()
+            if not commit_settings(function() settings.post_lock_sec = old end) then return end
             chat_msg(string.format(L("[MBReadyTimer] 着弾後の硬直を %.2f秒 に設定しました。", "[MBReadyTimer] Lock after landing set to %.2fs."), sec))
+        end
+
+    elseif cmd == "lead" then
+        -- //mbr lead <秒> : READY の効果音を硬直解除の何秒前に鳴らすか (0〜1。0 で硬直解除と同時)
+        local sec = tonumber(args[1])
+        if sec and sec == sec and sec >= 0 and sec <= LEAD_MAX then
+            local old = settings.sound_lead_sec
+            settings.sound_lead_sec = sec
+            if not commit_settings(function() settings.sound_lead_sec = old end) then return end
+            chat_msg(string.format(L("[MBReadyTimer] READY の効果音を硬直解除の %.2f秒前に鳴らします。", "[MBReadyTimer] The READY sound plays %.2fs before the lock ends."), sec))
+        else
+            chat_msg(L("[MBReadyTimer] 秒数は 0〜1 で指定してください (例: //mbr lead 0.2)。", "[MBReadyTimer] Use 0 to 1 second (e.g. //mbr lead 0.2)."))
         end
 
     elseif cmd == "fc" and tonumber(args[1]) then
         local fc_val = tonumber(args[1])
         if fc_val >= 0 and fc_val <= 80 then
+            local old = settings.fc_rate
             settings.fc_rate = fc_val / 100.0
-            save_settings()
+            if not commit_settings(function() settings.fc_rate = old end) then return end
             chat_msg(string.format(L("[MBReadyTimer] FC率を %d%% に変更しました。", "[MBReadyTimer] FC rate set to %d%%."), fc_val))
         end
 
@@ -734,41 +1093,44 @@ windower.register_event("addon command", function(cmd, ...)
         end
 
     elseif cmd == "size" and tonumber(args[1]) then
+        local old = current_size()
         local size = set_size(tonumber(args[1]))
-        save_settings()
+        if not commit_settings(function() set_size(old) end) then return end
         chat_msg(string.format(L("[MBReadyTimer] HUD の文字サイズを %d に変更しました。", "[MBReadyTimer] HUD text size set to %d."), size))
 
     elseif cmd == "sound" then
         settings.sound_enabled = not settings.sound_enabled
-        save_settings()
+        if not commit_settings(function() settings.sound_enabled = not settings.sound_enabled end) then return end
         chat_msg(string.format(L("[MBReadyTimer] 効果音通知: %s%s", "[MBReadyTimer] Sound: %s%s"), settings.sound_enabled and "ON" or "OFF",
             (windower.file_exists and not windower.file_exists(SOUND_FILE)) and L(" (sounds/ready.wav がありません)", " (sounds/ready.wav not found)") or ""))
 
     elseif cmd == "hud" then
         settings.show_hud = not settings.show_hud
-        save_settings()
+        if not commit_settings(function() settings.show_hud = not settings.show_hud end) then return end
         chat_msg(string.format(L("[MBReadyTimer] HUD表示: %s", "[MBReadyTimer] HUD: %s"), settings.show_hud and "ON" or "OFF"))
 
     elseif cmd == "sc" then
         -- //mbr sc : 学者の震天連携の動きの ON/OFF / //mbr sc window <秒> : 受付の目安 / //mbr sc report : 結果の 1 行の ON/OFF
         local sub = args[1] and args[1]:lower()
-        if sub == "window" and tonumber(args[2]) then
+        if sub == "window" then
+            -- 秒数が無い・数でないときも用法を出すだけ (震天モードの切り替えには落とさない)
             local sec = tonumber(args[2])
-            if sec >= 3 and sec <= 15 then
+            if sec and sec >= 3 and sec <= 15 then
+                local old = settings.sc_window_sec
                 settings.sc_window_sec = sec
-                save_settings()
+                if not commit_settings(function() settings.sc_window_sec = old end) then return end
                 chat_msg(string.format(L("[MBReadyTimer] 連携からの受付の目安を %.1f秒 にしました。", "[MBReadyTimer] Skillchain window estimate set to %.1fs."), sec))
             else
                 chat_msg(L("[MBReadyTimer] 秒数は 3〜15 で指定してください (例: //mbr sc window 10)。", "[MBReadyTimer] Use 3 to 15 seconds (e.g. //mbr sc window 10)."))
             end
         elseif sub == "report" then
             settings.sc_report = not settings.sc_report
-            save_settings()
+            if not commit_settings(function() settings.sc_report = not settings.sc_report end) then return end
             chat_msg(string.format(L("[MBReadyTimer] 連携ごとの結果の 1 行: %s", "[MBReadyTimer] One-line skillchain result: %s"), settings.sc_report and "ON" or "OFF"))
         else
             settings.sc_mode = not settings.sc_mode
+            if not commit_settings(function() settings.sc_mode = not settings.sc_mode end) then return end
             if not settings.sc_mode then state.sc = nil; state.recast_watch = {} end
-            save_settings()
             chat_msg(string.format(L("[MBReadyTimer] 学者の震天連携の動き: %s", "[MBReadyTimer] Scholar Immanence skillchain mode: %s"), settings.sc_mode and "ON" or "OFF"))
         end
 
@@ -777,18 +1139,22 @@ windower.register_event("addon command", function(cmd, ...)
             settings.sc_mode and "ON" or "OFF", num(settings.sc_window_sec, 10.0), settings.sc_report and "ON" or "OFF"))
         chat_msg(string.format(L("[MBReadyTimer] FC %d%% (実測が無いときに使用) / 着弾後の硬直 %.2f秒", "[MBReadyTimer] FC %d%% (used when there is no measurement) / lock after landing %.2fs"),
             math.floor(fc_rate() * 100 + 0.5), num(settings.post_lock_sec, 3.08)))
-        if state.last_measured_cast and state.cast.base > 0 then
-            local real_fc = 1 - state.last_measured_cast / state.cast.base
+        chat_msg(string.format(L("[MBReadyTimer] 効果音を硬直解除の %.2f秒前に鳴らす", "[MBReadyTimer] Sound plays %.2fs before the lock ends"), num(settings.sound_lead_sec, DEF_LEAD)))
+        -- 実測した詠唱の魔法名・基本詠唱時間と組で出す (今の詠唱の名前を付けない)
+        local m_sec, m_base = state.last_measured_sec, state.last_measured_base
+        if m_sec and m_base and m_base > 0 then
+            local real_fc = 1 - m_sec / m_base
             chat_msg(string.format(L("[MBReadyTimer] 直近の実測: %s 基本%.1fs → %.2fs (実効FC 約%d%%)", "[MBReadyTimer] Last measurement: %s base %.1fs -> %.2fs (effective FC about %d%%)"),
-                state.cast.spell_name, state.cast.base, state.last_measured_cast, math.floor(real_fc * 100 + 0.5)))
+                tostring(state.last_measured_name), m_base, m_sec, math.floor(real_fc * 100 + 0.5)))
         end
 
     elseif cmd == "lang" then
         -- //mbr lang auto|ja|en : 表示の言語。設定は保存され、読み込み直し (//lua r mbreadytimer) で切り替わる
         local v = args[1] and args[1]:lower()
         if v == "auto" or v == "ja" or v == "en" then
+            local old = settings.lang
             settings.lang = v
-            save_settings()
+            if not commit_settings(function() settings.lang = old end) then return end
             chat_msg("[MBReadyTimer] Language: " .. v .. " (reload with //lua r mbreadytimer to apply)")
         else
             chat_msg("[MBReadyTimer] Language: " .. tostring(settings.lang) .. " (now " .. LANG .. "). Use //mbr lang auto|ja|en")
@@ -798,6 +1164,10 @@ windower.register_event("addon command", function(cmd, ...)
         -- ジャ系の詠唱 → 着弾 → 硬直 → READY を模擬表示
         local now = os.clock()
         local c = state.cast
+        -- テストは詠唱の番号で予約を照合する (あとから実際の詠唱を始めたら、この予約は何もしない)
+        c.gen = c.gen + 1
+        local gen = c.gen
+        c.test = true
         c.active = true
         local test_name = L("サンダジャ", "Thundaja")
         c.spell_name = test_name
@@ -809,12 +1179,14 @@ windower.register_event("addon command", function(cmd, ...)
         c.immanence = false
         c.sc_name = nil
         c.landed_at = nil
+        c.measured = nil
+        c.spell_id, c.target_id = nil, nil
         c.ready_signaled = false
-        -- 着弾パケットの代わりに予測時刻で着弾させる
+        -- 着弾パケットの代わりに予測時刻で着弾させる (HUD の表示だけ。status の実測には入れない)
         coroutine.schedule(function()
-            if c.active and not c.landed_at and c.spell_name == test_name then
+            if c.gen == gen and c.test and c.active and not c.landed_at then
                 c.landed_at = os.clock()
-                state.last_measured_cast = c.landed_at - c.start
+                c.measured = c.landed_at - c.start
             end
         end, c.predicted)
         chat_msg(L("[MBReadyTimer] テスト表示を開始します (サンダジャの詠唱 → 着弾 → 硬直 → READY)。", "[MBReadyTimer] Test started (Thundaja cast -> landing -> lock -> READY)."))
@@ -823,6 +1195,7 @@ windower.register_event("addon command", function(cmd, ...)
         chat_msg(L("=== MBReadyTimer コマンドヘルプ ===", "=== MBReadyTimer commands ==="))
         chat_msg(L("//mbr fc <FC率>       : FC率を変更 (例: //mbr fc 80)", "//mbr fc <rate>       : set the FC rate (e.g. //mbr fc 80)"))
         chat_msg(L("//mbr post <秒>       : 着弾後の硬直秒数を設定 (例: //mbr post 3.08)", "//mbr post <sec>      : set the lock after landing (e.g. //mbr post 3.08)"))
+        chat_msg(L("//mbr lead <秒>       : READY の効果音を硬直解除の何秒前に鳴らすか (0〜1、初期値 0。表示は変わりません。例: //mbr lead 0.2)", "//mbr lead <sec>      : play the READY sound this many seconds before the lock ends (0-1, default 0; the HUD does not change, e.g. //mbr lead 0.2)"))
         chat_msg(L("//mbr status          : 現在の設定と直近の実測詠唱時間を表示", "//mbr status          : show settings and the last measured cast time"))
         chat_msg(L("//mbr learn [reset]   : 予測に使っている実測の一覧 / reset で消して覚え直す", "//mbr learn [reset]   : list the measurements used for prediction / reset to learn again"))
         chat_msg(L("//mbr sc              : 学者の震天連携の動き ON/OFF (震天 1 発目は READY を鳴らさない・連携後の経過を表示)", "//mbr sc              : Scholar Immanence skillchain mode ON/OFF (no READY sound on the 1st spell, shows time since the skillchain)"))
